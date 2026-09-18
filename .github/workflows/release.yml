@@ -236,6 +236,10 @@ jobs:
             "dist/PureVox/_internal/about/windows.md",
             "dist/PureVox/_internal/about/linux.md",
             "dist/PureVox/_internal/models",
+            "dist/PureVox/_internal/models/hush/enc_conv.onnx",
+            "dist/PureVox/_internal/models/hush/enc_gru.onnx",
+            "dist/PureVox/_internal/models/hush/erb_dec.onnx",
+            "dist/PureVox/_internal/models/hush/df_dec.onnx",
             "dist/PureVox/_internal/server/opus.dll",
             "dist/PureVox/_internal/html/index.html"
           )

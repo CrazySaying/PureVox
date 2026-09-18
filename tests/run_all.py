@@ -33,6 +33,7 @@ TEST_FILES = [
     "test_playback_sink.py",    # 播放正确性（合成时钟，无硬件）
     "test_agc.py",              # AGC 弹道/门限（合成 DSP，无硬件）
     "test_spectrum.py",         # Mel 频谱 64 段/20Hz-16kHz（合成 DSP，无硬件）
+    "test_hush_denoise.py",     # Hush 降噪：ERB/窗/重采样/往返/门控/注册（合成，需模型）
     "test_aec_rows.py",         # 行级 AEC：HopQueue 严格配对/AecRow（桩会话，无硬件）
     "test_aec_calib.py",        # AEC far 延迟校准：探测音+延迟估计（合成，无硬件）
     "test_transport.py",        # 传输层导入与优雅降级

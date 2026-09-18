@@ -38,6 +38,7 @@ from pvengine.components.core_plugins import (
     Eq10Plugin, Eq31Plugin, Eq61Plugin,
     CompressorPlugin,
     DenoiserPlugin,
+    HushDenoiserPlugin,
     TsePlugin,
 )
 from pvengine.components.agc import AgcPlugin
@@ -60,6 +61,7 @@ class NodeSpec:
 CATALOG: list[type] = [
     GainPlugin,
     DenoiserPlugin,
+    HushDenoiserPlugin,
     TsePlugin,
     GatePlugin,
     AgcPlugin,
@@ -83,6 +85,7 @@ MEDIA_NODE_TYPES = frozenset({"soundpad", "music_player", "desktop_audio"})
 # expand  = 行内控制 + 「展开」按钮弹出独立 UI 对话框
 UI_TIERS = {
     "denoiser": "toggle",
+    "hush_denoise": "toggle",  # 与 denoiser 同样只需开/关（衰减上限暂不做 UI）
     "eq10": "expand",          # 展开：EQ 曲线编辑器（10 段）
     "eq31": "expand",          # 展开：EQ 曲线编辑器（31 段）
     "eq61": "expand",          # 展开：EQ 曲线编辑器（61 段）

@@ -236,11 +236,29 @@ class _AiPluginBase(Effect):
 
 
 class DenoiserPlugin(_AiPluginBase):
-    """AI 智能降噪（202609 模型）。引擎经 cache 共享，重建链不重复加载。"""
+    """PureVox AI 降噪（自研 202609 模型，48 kHz 全带宽）。
+    引擎经 cache 共享，重建链不重复加载。
+
+    id 保持 `denoiser` 不动：它持久化在用户配置的 plugin_chain 里，改 id 会让
+    老配置的降噪节点静默消失（AGENTS.md「强配置（无迁移）」）。
+    """
 
     NAME = "denoiser"
-    LABEL = "AI 降噪"
+    LABEL = "PureVox AI 降噪"
     _KIND = "denoise"
+
+
+class HushDenoiserPlugin(_AiPluginBase):
+    """Hush AI 降噪（外部模型，16 kHz 原生，输出带宽 0–8 kHz）。
+
+    与 DenoiserPlugin 是**两个独立的降噪节点**，各自一套模型，可按需串联或二选一
+    （见 AGENTS.md「一个功能只有一条规范实现路径」的例外说明：两者是不同模型提供的
+    不同能力选择，不是同一功能的平行实现）。
+    """
+
+    NAME = "hush_denoise"
+    LABEL = "Hush AI 降噪"
+    _KIND = "hush"
 
 
 class TsePlugin(_AiPluginBase):
@@ -294,4 +312,10 @@ def _make_stage(kind):
     if kind == "tse":
         from pvengine.components.tse import TseStage
         return TseStage(_model_file(_mc.TSE_MODEL))
+    if kind == "hush":
+        import os
+        from pvengine.components.hush import HushStage
+        # HushStage 要的是目录（四个图同目录），故探路一个文件再取 dirname
+        probe = _model_file(os.path.join(_mc.HUSH_DIR, "enc_conv.onnx"))
+        return HushStage(os.path.dirname(probe))
     raise ValueError(kind)

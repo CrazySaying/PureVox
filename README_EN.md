@@ -11,7 +11,7 @@ echo cancellation, for both the local microphone and remote network streaming.
 
 ## Features
 
-- 🎤 Real-time AI denoising (48 kHz, models loaded on demand)
+- 🎤 Real-time AI denoising (PureVox 48 kHz in-house model + Hush 16 kHz model, loaded on demand)
 - 🗣️ TSE target speech extraction (record a reference clip, then separate your voice from the background)
 - 🔊 AEC echo cancellation
 - 🎛️ EQ: 10-band (1-octave) / 31-band (1/3-octave) / 61-band (1/6-octave)

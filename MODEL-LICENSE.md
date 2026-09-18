@@ -26,7 +26,28 @@ PureVox 的源代码采用 **GNU General Public License v3.0 or later (GPL-3.0)*
 - <https://github.com/a2heng/lightweight-denoise-48k>（MIT，可自由使用）
 - <https://github.com/a2heng/lightweight-aec-48k>（MIT，可自由使用）
 
-## 二、授权范围
+## 二、外部模型（Apache-2.0，**不适用**第一节的限制）
+
+`models/hush/` 下的 Hush 降噪模型**不是** a2heng 的财产，**不受**第一节的专有限制：
+
+- `models/hush/enc_conv.onnx`、`enc_gru.onnx`、`erb_dec.onnx`、`df_dec.onnx`（Hush 降噪，16 kHz 原生）
+
+来源与许可：
+
+- 模型与网络权重：<https://github.com/pulp-vision/Hush>（**Apache License 2.0**）。
+  仓库内的四个图由 `tools/hush_stateful_onnx.py` 从官方发布包改造而来
+  （外露 GRU 循环状态、把带时域卷积的编码器拆成两半），**只改图接口、不动任何权重**；
+- 网络结构与流式状态语义源自
+  [DeepFilterNet](https://github.com/Rikorose/DeepFilterNet)（作者 Hendrik Schröter 等，
+  MIT / Apache-2.0 双许可）；
+- `pvengine/components/hush_dsp.py` 是 libdf 前后端 DSP 的 numpy 移植，同样保留上游归属。
+
+该目录下的模型可自由使用与再分发，只需保留本声明与原始许可。Apache-2.0 与 PureVox
+本体所用的 GPL-3.0-or-later 兼容，两者不冲突。
+
+## 三、授权范围
+
+**以下限制仅适用于第一节所列的 a2heng 专有模型**（不适用于第二节的 Hush）：
 
 在未获得作者另行书面授权的情况下：
 
@@ -35,16 +56,16 @@ PureVox 的源代码采用 **GNU General Public License v3.0 or later (GPL-3.0)*
 - 禁止：以任何形式将模型用于闭源或开源商业产品的核心功能；
 - 禁止：移除、隐匿本声明及模型的版权信息。
 
-## 三、申请授权
+## 四、申请授权
 
-如需将模型用于其它用途（包括但不限于：集成到其它项目、商业产品、模型蒸馏与训练），
-请联系作者获取授权：
+如需将**第一节所列的专有模型**用于其它用途（包括但不限于：集成到其它项目、商业产品、
+模型蒸馏与训练），请联系作者获取授权：
 
 - GitHub: <https://a2heng.github.io/>
 - 哔哩哔哩: <https://space.bilibili.com/10850943>
 - 邮箱: <752848283@qq.com>
 
-## 四、免责声明
+## 五、免责声明
 
 除适用法律强制规定外，PureVox 及内置模型按"原样"提供，不附带任何明示或默示保证。
 任何因使用本软件或模型而产生的直接或间接损失，作者均不承担责任（除非另行书面约定）。

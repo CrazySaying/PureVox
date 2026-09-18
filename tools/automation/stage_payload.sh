@@ -22,6 +22,9 @@ for f in \
 done
 mkdir -p "$ROOT/models" "$ROOT/assets/icons" "$ROOT/assets/fonts"
 cp models/*.onnx "$ROOT/models/"
+# Hush（外部模型，Apache-2.0）：四个图 + config.ini 放在子目录里，不能只靠上面的通配
+mkdir -p "$ROOT/models/hush"
+cp models/hush/*.onnx models/hush/config.ini "$ROOT/models/hush/"
 cp assets/icons/*.ico "$ROOT/assets/icons/"
 # Built-in pixel font (registered at runtime via the user fontconfig dir)
 cp assets/fonts/*.ttf "$ROOT/assets/fonts/"

@@ -1,5 +1,32 @@
 # 更新日志
 
+## 2026-09-15 — 新增「Hush AI 降噪」节点；原「AI 降噪」更名为「PureVox AI 降噪」
+
+- **新增降噪节点「Hush AI 降噪」**：接入开源语音增强模型 Hush
+  （pulp-vision/Hush，Apache-2.0，16 kHz 原生）。它专门针对**背景人声**（旁人说话）
+  训练，与自研降噪互补；仅在用户手动添加时生效，**不进默认链**。
+  - **代价如实说明**：模型原生 16 kHz，**输出带宽上限 8 kHz** —— 8 kHz 以上内容被
+    完全移除（不是衰减），听感比 48 kHz 的 PureVox 降噪更「闷」。这是该模型的固有
+    属性（面向电话/Voice AI 的设计），不是实现缺陷，任何接入方式都绕不过去。
+  - **纯 Python 实现，无任何预编译二进制**：官方只提供预编译 Rust 动态库，
+    本项目改为「四个 ONNX 图 + 自研 libdf DSP 移植」运行，STFT / ERB 滤波器组 /
+    指数归一化 / 深滤波 / 合成为纯 numpy，无 PyTorch、无 Rust 库。与官方发布库
+    逐帧对拍 500 帧真实语音，输出最大相对误差 4.4e-04、RMS 比值 1.0000。
+  - 实测约 **13 倍实时**（0.75 ms / 10ms 帧），端到端延迟约 12 ms
+    （含 48k<->16k 多相 FIR 的 1.96 ms 群延迟）。
+- **原「AI 降噪」更名为「PureVox AI 降噪」**：加入 Hush 后「AI 降噪」不再有辨识度。
+  只改**显示名**，节点 id `denoiser` 保持不变 —— id 持久化在用户配置的 plugin_chain
+  里，改 id 会让老配置的降噪节点静默消失（强配置、无迁移）。
+- **为何新建文件而非扩展既有降噪**：既有 `DenoiseStage` 是 48 kHz 定采样率、
+  且 STFT 在模型图内的三件套契约（波形 hop 进出）；Hush 是 16 kHz、STFT 在 host 侧、
+  有 4 个独立图与需按帧回灌的显式循环状态，接口契约根本不同，无法靠加参数扩展，
+  故新增 `pvengine/components/hush.py`（编排）与 `hush_dsp.py`（DSP 移植），
+  以及 `pvengine/dsp/resample3.py`（48k<->16k 抗混叠多相 FIR —— 既有的
+  `dsp.resampler` 是只用于参考信号的三次插值，3:1 抽取时无抗混叠，会毁掉输出）。
+- **许可声明区分两类模型**：`MODEL-LICENSE.md` 新增「外部模型（Apache-2.0）」一节，
+  明确 Hush 不是 a2heng 的财产、不受专有条款约束；`LICENSE-THIRD-PARTY.txt` 补充
+  Hush 与 DeepFilterNet 的归属声明及 Apache-2.0 全文。
+
 ## 2026-09-15 — Linux 发行包修复 + 提示与文档校正
 
 - **Linux 发行包修复**：`qr_tk.py`（网络输入二维码渲染）与 `qrcode` 依赖此前未随

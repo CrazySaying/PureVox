@@ -37,6 +37,7 @@ Set-Content _build_version.py "BUILD_DATE = `"$date`"" -Encoding UTF8
     --hidden-import=pvplatform.audio.pwpipe_client `
     --add-data="about;about" `
     --add-data="models\*.onnx;models" `
+    --add-data="models\hush;models\hush" `
     --add-data="assets\icons\*.ico;assets\icons" `
     --add-data="assets\fonts\*.ttf;assets\fonts" `
     --add-data="html\*.html;html\" `

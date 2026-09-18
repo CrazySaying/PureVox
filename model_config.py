@@ -32,3 +32,10 @@
 DENOISE_MODEL = "models/purevox_denoise_202609_ep0000.onnx"
 AEC_MODEL = "models/purevox_aec_202609_cpx_ep0375.onnx"
 TSE_MODEL = "models/purevox_tse_202609c_ep0201.onnx"
+
+# ── Hush（外部模型，Apache-2.0，16 kHz 原生）──
+# 与上面三个 a2heng 专有模型不同：Hush 由 pulp-vision/Hush 发布，Apache-2.0 可再分发，
+# 详见 MODEL-LICENSE.md 与 LICENSE-THIRD-PARTY.txt。
+# 目录下四个图（enc_conv/enc_gru/erb_dec/df_dec）由 tools/hush_stateful_onnx.py
+# 从官方 bundle 改造而来（外露 GRU 状态 + 拆分带时域卷积的编码器），不可手工替换。
+HUSH_DIR = "models/hush"
