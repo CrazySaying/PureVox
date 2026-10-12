@@ -231,10 +231,45 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
+    // ---------------------------------------------------------------- 地址归一
+
+    /**
+     * 把用户填的东西归一成 `host[:port]`。
+     *
+     * 电脑端「手机」面板显示的是**网页地址** `http://192.168.1.5:59123/`
+     * （二维码扫出来就是它，页面上还有「复制」按钮），不是 `ws://`。
+     * 所以这里三种写法都要认：
+     *   - `192.168.1.5:59123`   —— 手敲 / 老习惯
+     *   - `192.168.1.5`         —— 端口用默认
+     *   - `http://192.168.1.5:59123/`、`ws://…`、`https://…` —— 从电脑端复制来的
+     * 空的一律返回空串，由调用方报「请先填写」。
+     */
+    private fun normalizeTarget(raw: String): String {
+        var s = raw.trim()
+        if (s.isEmpty()) return ""
+        // 去协议头（大小写都认）
+        s = s.replace(Regex("(?i)^(https?|wss?)://"), "")
+        // 去路径 / 查询 / 片段
+        s = s.substringBefore('/').substringBefore('?').substringBefore('#')
+        // 结尾的冒号（`192.168.1.5:`）是常见的半截输入，去掉再用默认端口
+        if (s.endsWith(":")) s = s.dropLast(1)
+        // IPv6 字面量必须带方括号：`[fe80::1]:59123`
+        if (s.startsWith("[")) {
+            val close = s.indexOf(']')
+            if (close < 0) return ""
+            val hostPart = s.substring(0, close + 1)
+            val rest = s.substring(close + 1)
+            return if (rest.startsWith(":")) hostPart + rest else hostPart
+        }
+        // 多个冒号又没方括号 = 裸 IPv6，不补端口
+        if (s.count { it == ':' } > 1) return s
+        return s
+    }
+
     // ---------------------------------------------------------------- 连接
 
     private fun connect() {
-        val target = etHost.text.toString().trim()
+        val target = normalizeTarget(etHost.text.toString())
         if (target.isEmpty()) {
             showErr("请先填写电脑的 IP 或主机名")
             return
@@ -339,7 +374,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun runHealthCheck() {
-        val target = etHost.text.toString().trim()
+        val target = normalizeTarget(etHost.text.toString())
         if (target.isNotEmpty()) host = target
         healthText = "自检中…"
         updateStatus()
@@ -626,8 +661,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun savePrefs() {
-        // 用户改了地址框但没点连接时也别丢掉
-        val typed = etHost.text.toString().trim()
+        // 用户改了地址框但没点连接时也别丢掉（存归一后的，别把 `http://…/` 存进去）
+        val typed = normalizeTarget(etHost.text.toString())
         if (typed.isNotEmpty()) host = typed
         getSharedPreferences(PREFS, MODE_PRIVATE).edit()
             .putString("host", host)

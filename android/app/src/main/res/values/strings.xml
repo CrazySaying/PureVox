@@ -22,7 +22,7 @@
 
     <!-- 标题区 -->
     <string name="subtitle">远程麦克风 · 扬声器 · 键盘客户端</string>
-    <string name="hint_host">电脑 IP 或主机名</string>
+    <string name="hint_host">电脑 IP 或主机名（可直接粘电脑端复制的网址）</string>
     <string name="btn_connect">连接</string>
     <string name="btn_disconnect">断开</string>
     <string name="btn_health">自检 GET /health</string>
