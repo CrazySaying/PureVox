@@ -25,6 +25,7 @@
 //! **平台**：传输与编解码跨平台（axum + tokio + 运行时加载的 libopus）；
 //! 只有关键词注入是平台相关（Windows `SendInput`，其余平台明确报不可用，见 `keys`）。
 
+pub mod addrs;
 pub mod hub;
 pub mod keymap;
 pub mod keys;

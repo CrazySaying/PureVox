@@ -102,6 +102,10 @@ windows = { version = "0.62", features = [
   "Win32_System_Com",
   # 网络：运行时加载预编译 opus.dll（不引入 C 编译链）
   "Win32_System_LibraryLoader",
+  # 网络：枚举本机网卡（GetAdaptersAddresses），给「手机」面板选子网用
+  "Win32_NetworkManagement_IpHelper",
+  "Win32_NetworkManagement_Ndis",
+  "Win32_Networking_WinSock",
 ] }
 
 [target.'cfg(unix)'.dependencies]
