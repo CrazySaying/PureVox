@@ -175,6 +175,12 @@
     '同网段无鉴权：开启后同一 Wi-Fi 下的任何设备都能向这台电脑打字和发按键':
       'No authentication on the local network: once on, any device on the same Wi-Fi can type and send keys to this PC',
     '二维码生成失败：': 'QR generation failed: ',
+    'AEC 消除回声': 'AEC (echo cancellation)',
+    '网络麦克风（不可更改）': 'Network microphone (not changeable)',
+    '系统默认输出': 'System default output',
+    '网络出站（本机刚发出的音频）': 'Network outbound (audio this PC just sent)',
+    '勾上后这台网络的麦克风会先过 AEC：远端取哪一路由上面选。近端永远是这张卡的网络输入，不能改。':
+      'Once on, this network microphone goes through AEC first. Pick where the reference comes from above; the near end is always this card\'s network input and cannot be changed.',
     '设备已更新（{a} 入 / {b} 出）': 'Devices updated ({a} in / {b} out)',
     '网络扬声器：把处理后的声音 Opus 编码后发给所有已订阅的客户端。客户端连上并订阅后就有声音。':
       'Network speaker: the processed audio is Opus-encoded and sent to every subscribed phone. Sound arrives once a phone opens the client and subscribes.',
@@ -302,7 +308,6 @@
       'After creating, pick "PureVox out" or "PureVox mic" as the microphone in other apps.',
     不可用: 'Unavailable',
     正常: 'OK',
-    系统默认输出: 'System default output',
   }
 
   // Rust 中文模板串表：zh = Rust format! 产出的字面骨架（{占位} 即捕获组），en = 同构

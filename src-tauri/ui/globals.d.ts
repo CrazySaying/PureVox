@@ -45,8 +45,17 @@ interface Window {
    *  库里那份是上游老式写法、过不了 checkJs，已在 jsconfig.json 里 exclude，
    *  所以这里的类型是手写的。 */
   __pvQr?: PvQrImpl
-  /** 网络行卡片（netrow.js 注册，columns.js 调用）：状态灯 / 启停重启 / 地址 / 二维码 */
-  __pvNetRow?: { attach(el: HTMLElement, ci: number, ri: number, row: any): boolean; reset(): void }
+  /** 网络行卡片（netrow.js 注册，columns.js 调用）：状态灯 / 启停重启 / 地址 / 二维码 / AEC 段 */
+  __pvNetRow?: {
+    attach(
+      el: HTMLElement,
+      ci: number,
+      ri: number,
+      row: any,
+      hooks?: { apply?: () => void }
+    ): boolean
+    reset(): void
+  }
   // 语言切换后各模块重渲染：在 document 上监听 'pv-langchange'（i18n.js 派发）
 }
 

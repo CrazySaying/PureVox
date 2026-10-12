@@ -150,12 +150,39 @@
     }
   }
 
+  /** 小标签 */
+  const nl = (t) => {
+    const s = document.createElement('span')
+    s.className = 'netcard-label'
+    s.textContent = t
+    return s
+  }
+
   /**
-   * 给一行网络行挂上完整卡片。
+   * AEC 的数值参数。改完立刻 apply（重建会话）——这些数都参与建行，跑起来就固定了。
+   */
+  function netNum(row, key, min, max, step, apply) {
+    const i = document.createElement('input')
+    i.type = 'number'
+    i.min = String(min)
+    i.max = String(max)
+    i.step = String(step)
+    i.style.width = '4.5em'
+    i.value = row.params[key] ?? '0'
+    i.addEventListener('change', () => {
+      row.params[key] = i.value
+      if (typeof apply === 'function') apply()
+    })
+    return i
+  }
+
+  /**
    * @param {HTMLElement} elRow 行容器（`columns.js` 传进来）
    * @param {number} _ci @param {number} _ri @param {any} row
+   * @param {{apply?: () => void}} [hooks]
    */
-  function attach(elRow, _ci, _ri, row) {
+  function attach(elRow, _ci, _ri, row, hooks) {
+    const apply = hooks && hooks.apply
     const out = row.ptype === 'remote_speaker'
 
     // 网络行卡片。**手机相关的全部操作都在这里**——顶栏不再有独立面板（用户明确要求：
@@ -267,6 +294,103 @@
       url.className = 'mono netcard-url ' + (addrUrl ? '' : 'na')
       drawQr(qrBox)
     }
+
+    // 5) AEC 复选框。网络麦克风**近端锁死是网络**（卡片上不可改 —— 这就是这张卡的
+    //    意义），勾上后才长出完整 AEC 控件：远端来源 / 近端·远端增益 / 延时 / 校准 /
+    //    直通。远端默认「系统默认输出回环」：PC 自己外放最常见，也最容易用
+    //    VB-CABLE 之类的虚拟设备搭出来验证。
+    const aecBox = document.createElement('div')
+    aecBox.className = 'netcard-aec'
+    const aecHead = document.createElement('label')
+    aecHead.className = 'en netcard-aec-head'
+    const aecCb = document.createElement('input')
+    aecCb.type = 'checkbox'
+    aecCb.checked = row.params.aec === '1'
+    aecCb.addEventListener('change', () => {
+      row.params.aec = aecCb.checked ? '1' : '0'
+      // AEC 是结构性变更（模型要加载、far 采集要起停），必须重建会话
+      if (typeof apply === 'function') apply()
+    })
+    aecHead.append(aecCb, document.createTextNode(T('AEC 消除回声')))
+    aecBox.appendChild(aecHead)
+
+    const near = document.createElement('div')
+    near.className = 'netcard-far'
+    near.appendChild(nl(T('近端')))
+    // 近端锁死：网络麦克风本来就是网络输入，没有别的可选
+    const nearLocked = document.createElement('span')
+    nearLocked.className = 'netcard-locked'
+    nearLocked.textContent = T('网络麦克风（不可更改）')
+    near.appendChild(nearLocked)
+    near.appendChild(nl(T('远端')))
+    const farSel = document.createElement('select')
+    farSel.className = 'netcard-sel'
+    const farOpts = [
+      ['loopback', T('系统默认输出')],
+      ['network', T('网络出站（本机刚发出的音频）')],
+    ]
+    farSel.append(...farOpts.map(([v, t]) => {
+      const o = document.createElement('option')
+      o.value = v
+      o.textContent = t
+      return o
+    }))
+    if (!row.params.far_device) row.params.far_device = 'loopback'
+    farSel.value = row.params.far_device
+    farSel.addEventListener('change', () => {
+      row.params.far_device = farSel.value
+      if (typeof apply === 'function') apply()
+    })
+    near.appendChild(farSel)
+    aecBox.appendChild(near)
+
+    const gains = document.createElement('div')
+    gains.className = 'netcard-far'
+    gains.appendChild(nl(T('近端增益')))
+    gains.appendChild(netNum(row, 'mic_gain_db', -40, 40, 1, apply))
+    gains.appendChild(nl(T('远端增益')))
+    gains.appendChild(netNum(row, 'far_gain_db', -40, 40, 1, apply))
+    gains.appendChild(nl(T('延时')))
+    gains.appendChild(netNum(row, 'far_delay_ms', -1000, 1000, 10, apply))
+    const byp = document.createElement('label')
+    byp.className = 'en'
+    const bcb = document.createElement('input')
+    bcb.type = 'checkbox'
+    bcb.checked = row.params.bypass === '1' || row.params.bypass === 'true'
+    bcb.addEventListener('change', () => {
+      row.params.bypass = bcb.checked ? '1' : '0'
+      if (typeof apply === 'function') apply()
+    })
+    byp.append(bcb, document.createTextNode(T('直通')))
+    gains.appendChild(byp)
+    const cal = document.createElement('button')
+    cal.type = 'button'
+    cal.textContent = T('校准')
+    cal.title = T('送扫频探针：测延时并自动配平近端 / 远端')
+    cal.addEventListener('click', () => {
+      cal.disabled = true
+      cal.textContent = T('校准中')
+      invoke('calibrate_aec_delay')
+        .then((t) => window.__pvDebug?.(T('开始校准：') + String(t)))
+        .catch((e) => {
+          window.__pvDebug?.(T('校准失败：') + String(e))
+          cal.disabled = false
+          cal.textContent = T('校准')
+        })
+    })
+    gains.appendChild(cal)
+    aecBox.appendChild(gains)
+
+    const aecHelp = document.createElement('p')
+    aecHelp.className = 'netcard-help'
+    aecHelp.textContent = T('勾上后这台网络的麦克风会先过 AEC：远端取哪一路由上面选。近端永远是这张卡的网络输入，不能改。')
+    aecBox.appendChild(aecHelp)
+    box.appendChild(aecBox)
+
+    /** 按勾选状态显隐 AEC 控件（勾上才有意义，不勾时占地方也没信息） */
+    const syncAec = () => { aecBox.classList.toggle('on', aecCb.checked) }
+    aecCb.addEventListener('change', syncAec)
+    syncAec()
 
     elRow.appendChild(box)
     cards.add({ el: elRow, paint })

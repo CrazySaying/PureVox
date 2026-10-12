@@ -103,6 +103,12 @@ impl WorkerHandle {
       let _ = j.join();
     }
   }
+
+  /// 线程**起不来**时的退化句柄：`stop` 已是停，join 可缺。
+  /// 与 [`WorkerHandle::new`] 分开是因为 `new` 要求一定有 join 句柄。
+  pub fn dead(stop: Arc<AtomicBool>) -> Self {
+    WorkerHandle { stop, join: None }
+  }
 }
 
 struct State {

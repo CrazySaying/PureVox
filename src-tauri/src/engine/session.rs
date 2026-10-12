@@ -162,6 +162,164 @@ impl Session {
   }
 }
 
+/// 网络麦克风行勾了 AEC 时要用的参数（一包，免得 `build_net_aec_row` 参数列太长）。
+struct NetAecParams {
+  model: String,
+  far: String,
+  delay_ms: f64,
+  mic_gain: f32,
+  far_gain: f32,
+  bypass: bool,
+}
+
+impl NetAecParams {
+  fn from(row: &crate::plan::RowSpec) -> Self {
+    let num = |k: &str| {
+      row
+        .params
+        .get(k)
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .unwrap_or(0.0)
+    };
+    Self {
+      model: row
+        .params
+        .get("model")
+        .cloned()
+        .unwrap_or_else(|| crate::infer::aec::MODEL_AEC.to_string()),
+      far: row
+        .params
+        .get("far_device")
+        .cloned()
+        .unwrap_or_else(|| "loopback".into()),
+      delay_ms: num("far_delay_ms"),
+      mic_gain: 10f32.powf((num("mic_gain_db") / 20.0) as f32),
+      far_gain: 10f32.powf((num("far_gain_db") / 20.0) as f32),
+      bypass: row
+        .params
+        .get("bypass")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false),
+    }
+  }
+}
+
+/// 加载模型并挂到行上（网络 AEC 用）。近端固定取 `near` 扇出 —— 网络麦克风的近端
+/// 就是它自己，卡片上不可改。
+fn aec_attach(
+  row: &mut Row,
+  p: &NetAecParams,
+  hist: Arc<Mutex<FarHistory>>,
+  near: &Arc<Fanout>,
+) -> Result<(), String> {
+  let engine = Aec::load(&p.model)?;
+  row.aec = Some(AecRow {
+    engine,
+    hist,
+    // 延时取整到 10 ms（= 1 hop 的整数倍），far 窗口与 hop 网格对齐
+    delay_samples: (p.delay_ms / 10.0).round() as i64 * HOP as i64,
+    mic_hops: 0,
+    mic: near.subscribe("net-mic"),
+    mic_gain: p.mic_gain,
+    far_gain: p.far_gain,
+    bypass: p.bypass,
+    exact: 0,
+    latest: 0,
+    pass: 0,
+    echo: crate::engine::aec::EchoMetrics::default(),
+  });
+  Ok(())
+}
+
+/// 网络麦克风行勾了 AEC（`params.aec == "1"`）时建行：近端 = 网络入站（锁死），
+/// 远端按 `far_device` 取。
+///
+/// 近/远端都经一层 `Fanout`（`spawn_net_pumps`），所以这一支和 `echo_cancel` 设备行
+/// 完全同构 —— 差别只是扇出的内容来自网络而不是采集设备，`AecRow` 一个字段都不用改。
+///
+/// far 选设备回环时**不能**拿网络泵那个没人灌的 far 扇出当参考（历史一直空，AEC 会
+/// 以为没有回声、静默失效），所以那种情况改用设备回环自己的扇出。
+fn build_net_aec_row(
+  row: &mut Row,
+  spec: &crate::plan::RowSpec,
+  hub: &SharedHub,
+  captures: &mut Vec<WorkerHandle>,
+  epoch: Arc<std::sync::atomic::AtomicU64>,
+  tag: String,
+) {
+  let p = NetAecParams::from(spec);
+  let net_far = p.far == crate::engine::aec::NET_FAR;
+  let near_fan = Arc::new(Fanout::new(format!("{tag}-netmic")));
+  let net = crate::net::hub();
+
+  // —— 情况 1：远端取网络出站。近/远端由同一个网络泵在同一次 tick 各推一格，——
+  //    所以两条时间轴天然锁在一起，`far_delay_ms` 才有个稳定基准。
+  if net_far {
+    let far_fan = Arc::new(Fanout::new(format!("{tag}-netfar")));
+    let hist = Arc::new(Mutex::new(FarHistory::new(FAR_HIST_SAMPLES)));
+    captures.push(crate::engine::aec::spawn_far_pump(
+      &far_fan,
+      hist.clone(),
+      &tag,
+      epoch,
+    ));
+    match aec_attach(row, &p, hist, &near_fan) {
+      Ok(()) => {
+        captures.push(crate::engine::aec::spawn_net_pumps(net, near_fan, far_fan));
+        row.label = "网络麦克风 + AEC（远端 网络出站）".into();
+      }
+      Err(e) => row.error = Some(e),
+    }
+    return;
+  }
+
+  // —— 情况 2：远端取设备（输出回环，或直接填了一个输入设备）——
+  let opened: Result<crate::audio::capture::Capture, String> =
+    match crate::engine::aec::far_loopback_id(&p.far) {
+      Some(id) => loopback::spawn(
+        hub.clone(),
+        if id.is_empty() { None } else { Some(id) },
+        format!("{tag}-f"),
+      ),
+      None => Err("未选择远端设备".into()),
+    };
+  let cap = match opened {
+    Ok(c) => {
+      captures.push(c.handle);
+      c.fanout
+    }
+    Err(_) => match capture::spawn(hub.clone(), p.far.clone(), format!("{tag}-f")) {
+      Ok(c) => {
+        captures.push(c.handle);
+        c.fanout
+      }
+      Err(e) => {
+        row.error = Some(e);
+        return;
+      }
+    },
+  };
+  let hist = Arc::new(Mutex::new(FarHistory::new(FAR_HIST_SAMPLES)));
+  captures.push(crate::engine::aec::spawn_far_pump(
+    &cap,
+    hist.clone(),
+    &tag,
+    epoch,
+  ));
+  match aec_attach(row, &p, hist, &near_fan) {
+    Ok(()) => {
+      // far 由设备提供，只让网络泵灌近端；第二个扇出没人灌、不参与
+      captures.push(crate::engine::aec::spawn_net_pumps(
+        net,
+        near_fan,
+        Arc::new(Fanout::new(format!("{tag}-unused-far"))),
+      ));
+      row.label = "网络麦克风 + AEC".into();
+    }
+    Err(e) => row.error = Some(e),
+  }
+}
+
 fn to_params(map: &BTreeMap<String, String>) -> Params {
   map
     .iter()
@@ -346,12 +504,28 @@ fn build_column(
       RowKind::Input if r.ptype == "remote_mic" => {
         // 网络麦克风：不需要虚拟声卡驱动，网络流直接进引擎（DESIGN.md §4.1）
         // 允许一个：入站是单队列，多行会互相抢样本
+        //
+        // **勾了 AEC（`params.aec == "1"`）时**（2026-10-12 加）：不再是直通，而是建
+        // 一张 AEC 行 —— 近端锁死为网络（卡片上不可改，这正是这张卡的意义），远端按
+        // `far_device` 取。近/远端各经一层 `Fanout`（`spawn_net_pumps`），所以 AEC
+        // 主循环与设备麦克风那条路完全同构。
         if remote_mic_used {
           row.error = Some("网络麦克风只允许一个输入行".into());
         } else {
           remote_mic_used = true;
-          row.label = "网络麦克风".into();
-          row.net_input = Some(crate::net::hub().clone());
+          if r.params.get("aec").map(|v| v == "1").unwrap_or(false) {
+            build_net_aec_row(
+              &mut row,
+              r,
+              hub,
+              &mut captures,
+              calib.epoch(),
+              format!("c{idx}r{ri}"),
+            );
+          } else {
+            row.label = "网络麦克风".into();
+            row.net_input = Some(crate::net::hub().clone());
+          }
         }
       }
       RowKind::Input if r.ptype == "loopback" => {

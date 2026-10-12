@@ -443,7 +443,7 @@ function rowElement(col, ci, row, ri) {
   // 地址与二维码、这行干什么的说明。跟媒体行同一个道理：控件只由一个模块画。
   if ((kind === 'input' && row.ptype === 'remote_mic') ||
       (kind === 'output' && row.ptype === 'remote_speaker')) {
-    if (window.__pvNetRow?.attach(el, ci, ri, row)) el.classList.add('net')
+    if (window.__pvNetRow?.attach(el, ci, ri, row, { apply })) el.classList.add('net')
   }
 
   // 媒体处理行（音效板 / 播放器）：控制区交给 `media.js`（音效网格 + 走带控制 +

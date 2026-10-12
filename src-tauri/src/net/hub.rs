@@ -230,6 +230,13 @@ pub struct NetHub {
   remote_input: AtomicBool,
   /// 统计计数（只有持锁者写，调试读时克隆）
   stats: Mutex<NetStats>,
+  /// **刚推给客户端的那个 hop**（网络麦克风卡勾了 AEC 时的「远端」参考源）。
+  ///
+  /// 为什么单独留一格而不让 AEC 去订阅出站：出站是**按订阅者各存一份**
+  /// （`OutboundSub`），AEC 要的是「这一 tick 我们发了什么」这一个事实，与有几个
+  /// 客户端无关；而且出站 hop 由列工作线程在同一 10 ms 节拍上推，所以这一格与引擎
+  /// hop 同源 —— AEC 的 `FarHistory` 序号网格才对得上。
+  tx_last: Mutex<([f32; HOP], u64)>,
   running: AtomicBool,
 }
 
@@ -249,6 +256,7 @@ impl NetHub {
         dropped: AtomicU64::new(0),
       },
       remote_input: AtomicBool::new(false),
+      tx_last: Mutex::new(([0.0f32; HOP], 0u64)),
       stats: Mutex::new(NetStats::default()),
       running: AtomicBool::new(false),
     }
@@ -309,7 +317,21 @@ impl NetHub {
 
   /// 列工作线程（`remote_speaker` 行）：按位置 tap 推一个 hop。
   pub fn push_tx_hop(&self, hop: &[f32]) {
+    if let Ok(mut slot) = self.tx_last.lock() {
+      let n = HOP.min(hop.len());
+      slot.0[..n].copy_from_slice(&hop[..n]);
+      for x in slot.0.iter_mut().skip(n) {
+        *x = 0.0;
+      }
+      slot.1 = slot.1.wrapping_add(1);
+    }
     self.outbound.push_hop(hop);
+  }
+
+  /// 读「刚推给客户端的 hop」。返回 `(样本, 累计 hop 数)`；`count` 每推一 hop 变 1，
+  /// 用来判断这一格是不是新的（AEC 的网络远端泵按它决定要不要再灌一格历史）。
+  pub fn tx_last(&self) -> ([f32; HOP], u64) {
+    *self.tx_last.lock().unwrap_or_else(|e| e.into_inner())
   }
 
   pub fn subscribe_tx(&self) -> (u64, OutboundSub) {

@@ -682,6 +682,16 @@ td { padding: 3px 8px 3px 0; overflow: hidden; text-overflow: ellipsis; }
 .netqr-side { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1 1 10em; }
 .netqr-note { color: var(--fg); font-size: 12px; min-width: 0; overflow-wrap: anywhere; }
 .netcard-help { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.45; min-width: 0; }
+/* AEC 段：默认收起，勾上复选框才展开（不占地方也不给错的信息）。 */
+.netcard-aec { display: none; flex-direction: column; flex-wrap: wrap; gap: 6px;
+  padding-top: 8px; border-top: 1px dashed var(--line-strong); }
+.netcard-aec.on { display: flex; }
+.netcard-aec-head { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.netcard-far { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.netcard-locked { color: var(--muted); font-size: 12px; padding: 3px 8px;
+  border: 1px dashed var(--line-strong); border-radius: var(--r-sm); }
+.netcard-sel { font: inherit; font-size: 12px; color: var(--fg); background: var(--bg-2);
+  border: 1px solid var(--line-strong); border-radius: var(--r-sm); padding: 4px 6px; }
 
 /* 滚动条：细一点，别抢视觉 */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
