@@ -299,20 +299,25 @@
     //    意义），勾上后才长出完整 AEC 控件：远端来源 / 近端·远端增益 / 延时 / 校准 /
     //    直通。远端默认「系统默认输出回环」：PC 自己外放最常见，也最容易用
     //    VB-CABLE 之类的虚拟设备搭出来验证。
-    const aecBox = document.createElement('div')
-    aecBox.className = 'netcard-aec'
+    // 复选框**必须常驻可见** —— 它不能放在下面那个默认 `display:none` 的容器里，
+    // 否则用户连勾都勾不上（我第一版就是这么写的，界面上什么都看不到）。
     const aecHead = document.createElement('label')
     aecHead.className = 'en netcard-aec-head'
     const aecCb = document.createElement('input')
     aecCb.type = 'checkbox'
     aecCb.checked = row.params.aec === '1'
+    aecHead.append(aecCb, document.createTextNode(T('AEC 消除回声')))
+    box.appendChild(aecHead)
+
     aecCb.addEventListener('change', () => {
       row.params.aec = aecCb.checked ? '1' : '0'
       // AEC 是结构性变更（模型要加载、far 采集要起停），必须重建会话
       if (typeof apply === 'function') apply()
     })
-    aecHead.append(aecCb, document.createTextNode(T('AEC 消除回声')))
-    aecBox.appendChild(aecHead)
+
+    // 控件区：默认收起，勾上才展开。
+    const aecBox = document.createElement('div')
+    aecBox.className = 'netcard-aec'
 
     const near = document.createElement('div')
     near.className = 'netcard-far'
