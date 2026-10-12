@@ -143,14 +143,34 @@ pub fn create_stage(ptype: &str, params: &Params) -> Result<Box<dyn Stage>, Stri
 
 | 类别 | ptype（示例） | 说明 |
 | --- | --- | --- |
-| 输入 | `audio_input` / `loopback` / `remote_mic` / `media` / `echo_cancel` | 源；同列多个混合 |
-| 处理 | `denoise_*` / `eq` / `gain` / `agc` / `compressor` | Stage；就地处理 |
+| 输入 | `audio_input` / `loopback` / `remote_mic` / `echo_cancel` | 源；同列多个混合 |
+| 处理 | `denoise_*` / `eq` / `gain` / `agc` / `compressor` / `soundpad` / `player` | Stage；就地处理 |
 | 输出 | `audio_output` / `remote_speaker` | 汇；位置 tap，送往设备或网络 |
 | 可视化 | `vu_meter` / `spectrum` | 只读 tap |
 
 - **AEC 行**：一个输入行 =「一路 mic + 一路 far」，mic 在行内先过 AEC 再进列；
   far 参考只给模型用，**不进信号路径**；历史不足则直通 mic。
-- **媒体行**（音板 / 音乐 / 系统声）：无采集设备，按需生成 hop 的输入行。
+- **桌面声音（`loopback` 输入行）**：捕获某只输出设备正在播放的系统混音作为源
+  （复用 AEC 的远端回环实现：Windows = WASAPI loopback，Linux = PipeWire monitor）。
+  `device` = `loopback`（系统默认输出）或 `loopback:<端点ID｜sink 名>`；带行内增益
+  `volume_db`（-30~6 dB，默认 -6 dB，系统混音偏响）。
+- **媒体行（`soundpad` / `player`）是处理行，不是输入行**：无采集设备，在自身链位置
+  把媒体样本与信号相加——挂链尾（默认）= 后级直通，媒体不经上游处理；拖到降噪之前
+  则参与处理（与 legacy 链注入语义一致，也符合 §3.2 的位置 tap 语义）。
+  - `soundpad`（音效板）：音效整段入内存（都是短音效，起播零延迟），起播/结束/
+    手动停止/重播一律 hop 内线性淡变（杜绝咔哒，**首样本恒为 0**）；重播同一音效 = 旧声部
+    淡出、新声部从**开头**起播；音量**每个音效一个**（±10 dB），拖动实时生效。
+    每个音效可绑**一个全局热键**（录键 + 清除），热键**存在计划里**（`pads` 参数的
+    `hotkey` 字段）——跟着音效走，增删音效即重注册，不另设一份设置。
+  - `player`（音乐播放器）：流式解码（后台线程 → 有界环形缓冲 → 音频线程每 hop 取
+    480 样本，内存恒定），曲目视作首尾相连的**环流**（EOF 回卷续播）；播放/暂停/seek/
+    音量；位置经 `resume_sec` 持久化（暂停/拖动/退出即写）。
+  - **媒体库**：导入时一律归一为 48 kHz 单声道 16-bit WAV，存 `~/.purevox/soundpad/`
+    （音效）或 `~/.purevox/music/`（曲目）；文件名 `<原名>-<sha1 前 8 位>.wav`
+    （同内容幂等复用）；配置只引用库内路径（不依赖外部原始文件）。
+  - **控制面**：播放/停止/seek/音量是**运行时命令**（不是计划参数），经全局
+    `MediaHub` 按 (列, 行) 寻址下发（与 `NetHub` 同款单例）；音量等热参数同时经
+    `persist_plan` 落盘**不重建会话**；增删音效 / 换曲 = 结构性变更 → `apply_plan` 重建。
 - **网络行**（本轮新增）：
   - `remote_mic` = 手机麦克风当电脑麦克风。**不需要虚拟声卡驱动**：网络流直接成为引擎的
     「源」，因此能进降噪 / TSE / AEC 全链。全会话只允许一个（全局单例）。
@@ -194,7 +214,32 @@ pub fn create_stage(ptype: &str, params: &Params) -> Result<Box<dyn Stage>, Stri
   scancode 映射表，含扩展键标记，`SendInput` 注入）。
 - **默认关闭**：须在界面显式开启「远程输入」才接受 `text` / `key`，否则回 `err`。
 - **无鉴权（明确取舍）**：同网段可直接连。代价是局域网内任何人都能向本机注入按键；因此该
-  开关默认关闭、界面常驻显示状态、界面上有一键关闭。
+    开关默认关闭、界面常驻显示状态、界面上有一键关闭。
+
+### 4.2 更新
+
+**唯一数据源 = 本仓库 GitHub Releases**（`repos/a2heng/PureVox/releases/latest`）。
+不引入更新插件、不自建 manifest：发版流水线（`.github/workflows/release.yml`）本来就把
+产物挂到 release 上，两端靠**文件名后缀**认领（不看版本号——版本号只有年月日，同日会重复）。
+
+| 阶段 | 含义 | 进入条件 |
+| --- | --- | --- |
+| `idle` | 尚未检查（开发构建也停在这，**不下「已是最新」的结论**） | 初始 / 开发构建 |
+| `checking` → `up_to_date` / `available` | 查 GitHub 并比较 | 用户点「检查更新」 |
+| `downloading` → `ready` | 下载本平台产物到 `~/.purevox/update/` | 状态 `available` |
+| `installing` | 平台安装器已拉起，进程即将退出 | 状态 `ready` |
+| `unsupported` / `failed` | 本平台不能自动装 / 出错（带原因） | 安装失败 |
+
+- **比较依据 = tag 的完整时间戳**（`v2026.10.08.1430`），不是显示版本号 `26.10.8`
+  ——同日发两次时显示版本相同，靠时分才能分出新旧。解析见 `version::parse_stamp`。
+  开发构建没有 CI 注入的时间戳（`version::is_dev()`），此时只报「开发构建」，
+  **绝不拿 Cargo 的 `0.1.0` 去和线上比出一个假结论**。
+- **产物匹配只看后缀**：Windows `-setup.exe` → `.msi`；Linux `.AppImage` → `.deb` →
+  `.rpm`；Android `.apk`。CI 统一重命名产物，后缀因此稳定。
+- **安装是平台实现**（`update/install_<platform>.rs`）：Windows 用 NSIS 静默
+  `/S /UPDATE /NS /R`，且**必须先退进程再装**（安装器会拦下正在运行的 exe）；
+  Linux 仅 AppImage 能自替换；其余明确「不支持 + 给出 release 页面」，**不静默失败**。
+- 状态同时进调试接口 `/debug` 的 `update` 段（与界面同源，AGENTS.md §1.2）。
 
 ---
 
@@ -216,7 +261,8 @@ pub struct RowSpec {
 - `SessionPlan::from_config(cfg)`：**纯函数**，只读注册表与配置，不做 I/O。
 - 校验：每列首行必须是输入、末行必须是输出（否则 `problems`）；网络行仅一个；无输出等。
 - **变更语义**：结构性变更（增删/排序行、开关节点、换设备、换型号、增删列）→ **整会话重启**；
-  热参数（增益、EQ 频点、阈值）→ 下发给运行中的实例，不重启。
+  热参数（增益、EQ 频点、阈值、媒体音量/seek）→ 下发给运行中的实例，不重启
+  （媒体行经 `MediaHub` 实时命令 + `persist_plan` 落盘，见 §4）。
 
 ---
 
@@ -284,6 +330,8 @@ pub fn resolve(key: &str, kind: ModelKind) -> Option<&'static ModelDesc>;
 | 频谱 / 波形 | `dsp::meter` | 波形 50 ms、频谱 481 bin，固定 |
 | AEC far 历史 | `engine` | 2 s 网格；`far_delay` ≤ 1000 ms |
 | 回环历史 | `engine` | 1.5 s |
+| 音效板声部 | `engine` | 每个音效一段 48k/mono 样本（短音效整段入内存） |
+| 播放器环形缓冲 | `engine` | 3 s（48k f32），解码线程写、音频线程读，超限丢最旧 |
 | 网络 acc | `net/remote_mic` / `net/remote_speaker` | 进出各一环，目标 50 ms，硬顶 80 ms（超限丢最旧）；取不足一个 hop 补静音 |
 | 模型 `cache` | `infer` | 由模型决定（降噪 36506 / AEC 215504 / TSE 513216 f32），**每行一份** |
 
@@ -316,9 +364,11 @@ pub fn resolve(key: &str, kind: ModelKind) -> Option<&'static ModelDesc>;
 | **模型注册表 + 型号选择** | ◑ 降噪/TSE 型号下拉已接入；统一 `ModelDesc` 注册表待做 | §7 |
 | **TSE 目标说话人提取** | ✅ 已实现（参考 10 s → `enr_tok`，3.9 ms/hop；参考可录制=降噪后+音量归一化；无参考直通） | §4 / §7 |
 | **AEC 回声消除** | ✅ 已实现（far 参考采集 + 2 s 网格对齐 + 每行缓存 + 互相关延时校准） | §4 |
-| 回环 | ✅ 已实现（`audio/loopback.rs`，WASAPI loopback） | 作为「输入行」的源 |
-| 媒体 | ⛔ | §4 |
+| 回环 | ✅ 已实现（`audio/loopback.rs`，WASAPI loopback） | 作为「输入行」的源（`loopback`，电脑播放音频） |
+| 媒体 | ✅ 已实现（后端 + 界面，2026-10-12）：`soundpad` / `player` 处理行、媒体库导入（symphonia）、每音效热键、MediaHub 控制 | §4 |
 | **网络（手机 ⇄ 电脑）** | ✅ 已实现：`remote_mic` 输入行 + `remote_speaker` 输出行 + Opus（运行时加载预编译 `opus.dll`）+ `text` 打字 / `key` 全尺寸键盘（默认关闭，界面开关） | §4 / §4.1 |
+| **更新检查 / 更新** | ✅ 已实现（2026-10-12）：GitHub Releases 查 → 下载 → 静默安装（Windows NSIS / Linux AppImage 自替换），顶栏「更新」面板 | §4.2 |
+| **版本号 年.月.日** | ✅ 已实现（2026-10-12）：`yy.m.d` 显示、tag 全时间戳比较；Android `versionCode` = `yyMMddHHmm` 单调递增 | — |
 
 **实施顺序**：
 1. ✅ Stage / Pipeline / 注册表骨架 + 现有降噪包成 Stage。

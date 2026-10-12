@@ -17,6 +17,7 @@
 
 //! Windows 全局热键实现（`RegisterHotKey` + 轮询消息队列）。解析/规范串见 [`super`]。
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::thread::JoinHandle;
@@ -26,14 +27,17 @@ use crate::debug::SharedHub;
 
 const MOD_NOREPEAT: u32 = 0x4000;
 
+/// 起始 id（后续按序号递增；一个线程管一组绑定）。
+const ID_BASE: i32 = 0x5056;
+
 /// 启动注册线程；注册成功返回其 JoinHandle，失败返回 None（结果写进调试接口）。
+///
+/// 消息队列里 `wParam` 就是 `RegisterHotKey` 的 id → 按 id 派发到对应回调。
+/// 某一键注册失败只跳过那一条（写进 `ui`），不影响其余绑定。
 pub(super) fn spawn(
-  bits: u32,
-  vk: u32,
-  spec: String,
+  bindings: Vec<super::Resolved>,
   hub: SharedHub,
   stop: Arc<AtomicBool>,
-  on_trigger: Arc<dyn Fn() + Send + Sync>,
 ) -> Option<JoinHandle<()>> {
   std::thread::Builder::new()
     .name("hotkey".into())
@@ -42,22 +46,32 @@ pub(super) fn spawn(
         HOT_KEY_MODIFIERS, RegisterHotKey, UnregisterHotKey,
       };
       use windows::Win32::UI::WindowsAndMessaging::{MSG, PM_REMOVE, PeekMessageW, WM_HOTKEY};
-      const ID: i32 = 0x5056;
-      if RegisterHotKey(None, ID, HOT_KEY_MODIFIERS(bits | MOD_NOREPEAT), vk).is_err() {
-        hub.push_ui("error", format!("热键注册失败（可能被占用）：{spec}"));
-        return;
+      let mut dispatch: HashMap<i32, Arc<dyn Fn() + Send + Sync>> = HashMap::new();
+      let mut registered: Vec<i32> = Vec::new();
+      for (i, (spec, bits, vk, cb)) in bindings.into_iter().enumerate() {
+        let id = ID_BASE + i as i32;
+        if RegisterHotKey(None, id, HOT_KEY_MODIFIERS(bits | MOD_NOREPEAT), vk).is_err() {
+          hub.push_ui("error", format!("热键注册失败（可能被占用）：{spec}"));
+          continue;
+        }
+        hub.push_ui("info", format!("热键已注册：{spec}"));
+        registered.push(id);
+        dispatch.insert(id, cb);
       }
-      hub.push_ui("info", format!("热键已注册：{spec}"));
       let mut msg = MSG::default();
       while !stop.load(Relaxed) {
         while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
-          if msg.message == WM_HOTKEY && msg.wParam.0 as i32 == ID {
-            on_trigger();
+          if msg.message == WM_HOTKEY
+            && let Some(cb) = dispatch.get(&(msg.wParam.0 as i32))
+          {
+            cb();
           }
         }
         std::thread::sleep(Duration::from_millis(20));
       }
-      let _ = UnregisterHotKey(None, ID);
+      for id in registered {
+        let _ = UnregisterHotKey(None, id);
+      }
     })
     .ok()
 }

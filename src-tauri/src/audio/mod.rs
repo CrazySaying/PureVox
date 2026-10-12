@@ -110,6 +110,9 @@ struct State {
   /// 运行中才有会话；停止时为空
   session: Option<Session>,
   running: bool,
+  /// 每次启停自增。校准「临时启动会话」的收尾据此判断：这期间有没有被用户或计划改动过
+  /// ——改过就不能再由我们停掉（否则会把用户刚起的会话也停了）。
+  epoch: u64,
 }
 
 /// 音频子系统：持有当前计划与由其构建的会话（可启动 / 停止）。
@@ -136,6 +139,7 @@ impl AudioManager {
         plan,
         session: None,
         running: false,
+        epoch: 0,
       }),
       rebuild: Mutex::new(()),
     }
@@ -147,6 +151,17 @@ impl AudioManager {
 
   pub fn is_running(&self) -> bool {
     self.state.lock().unwrap().running
+  }
+
+  /// 当前运行代号（每次启停 +1）。见 [`State::epoch`]。
+  pub fn run_epoch(&self) -> u64 {
+    self.state.lock().unwrap().epoch
+  }
+
+  /// 代号仍是 `expect` 且在运行 → 说明这期间没人动过引擎，我们可以安全收尾。
+  fn untouched_since(&self, expect: u64) -> bool {
+    let g = self.state.lock().unwrap();
+    g.running && g.epoch == expect
   }
 
   /// 先释放旧会话：Linux 的 ALSA **同一设备不能被打开两次**，旧的还占着，新的
@@ -173,6 +188,7 @@ impl AudioManager {
     let mut g = self.state.lock().unwrap();
     g.session = Some(session);
     g.running = true;
+    g.epoch += 1;
     drop(g);
     self.hub.set_running(true);
     Ok(problems)
@@ -186,6 +202,7 @@ impl AudioManager {
       s.stop();
     }
     g.running = false;
+    g.epoch += 1;
     drop(g);
     self.hub.set_running(false);
     // 清掉列概要，界面显示「列未启动」
@@ -204,10 +221,12 @@ impl AudioManager {
 
   /// 测 AEC 延时：对计划里第一个 AEC 行采集 1.5 s，并向会话所有输出设备送扫频探针；
   /// 结果见 `/debug` 的 `calib`。
-  pub fn calibrate_aec_delay(&self) -> Result<String, String> {
-    if !self.is_running() {
-      return Err("会话未运行：先点顶栏「启动」，再点「校准」".into());
-    }
+  ///
+  /// **不需要先手动启动**：校准必须有列工作线程把「原始近端 hop + 远端窗口」喂进
+  /// `calib::feed`（`engine/session.rs`），没有会话就没人喂。所以会话未运行时这里
+  /// **临时启动**一个，第二个返回值是 `Some(运行代号)` 表示「本次是临时的，测完要收尾
+  /// 停掉」——交给 [`Self::finish_temp_session`]（看门狗线程在 `main.rs`）。
+  pub fn calibrate_aec_delay(&self) -> Result<(String, Option<u64>), String> {
     let plan = self.plan();
     let mut target = None;
     'outer: for (ci, c) in plan.columns.iter().enumerate() {
@@ -261,12 +280,73 @@ impl AudioManager {
     if outs.is_empty() && far_sink.is_none() {
       return Err("没有输出设备可播放校准探针".into());
     }
+    // 会话没在跑 → **临时启动**一个：校准要列线程喂数据，没有会话永远停在「采集中」。
+    // 先把「有没有 AEC 行 / 有没有输出可放探针」这些前置条件查完再启动，避免白启一次。
+    let temp_epoch = if self.is_running() {
+      None
+    } else {
+      let problems = self.start()?;
+      self.hub.push_ui(
+        "info",
+        format!(
+          "校准需要会话在跑（列线程喂近端/远端），已临时启动{}",
+          if problems.is_empty() {
+            String::new()
+          } else {
+            format!("（有 {} 行未配置）", problems.len())
+          }
+        ),
+      );
+      Some(self.run_epoch())
+    };
     // 固定参考延时（见 calib::CALIB_REF_MS）：校准测的是绝对延时，不依赖当前存储值
-    self
+    if let Err(e) = self
       .calib
-      .start(ci, ri, 1.6, 1000.0, crate::engine::calib::CALIB_REF_MS)?;
+      .start(ci, ri, 1.6, 1000.0, crate::engine::calib::CALIB_REF_MS)
+    {
+      // 启动失败要把临时会话收回去，不能让它一直跑着
+      if let Some(epoch) = temp_epoch
+        && self.untouched_since(epoch)
+      {
+        self.stop();
+      }
+      return Err(e);
+    }
     crate::engine::calib::play_probe(self.hub.clone(), outs, far_sink);
-    Ok(format!("第 {} 列第 {} 行（探针已送出）", ci + 1, ri + 1))
+    Ok((
+      format!("第 {} 列第 {} 行（探针已送出）", ci + 1, ri + 1),
+      temp_epoch,
+    ))
+  }
+
+  /// 校准是否还在进行中（采集中 **或** 正在算）——看门狗据此决定何时收尾。
+  pub fn calib_in_flight(&self) -> bool {
+    self.calib.in_flight()
+  }
+
+  /// 校准跑完后收尾：**只停自己临时启动的会话**。
+  ///
+  /// - `Some(epoch)`：本次是临时启动的，且代号没变（期间用户没启停过、计划也没重建）
+  ///   → 停回未运行，保持用户原本的状态；
+  /// - 期间用户自己点了「启动」（代号变了）→ **什么都不做**，不能把用户的会话停掉；
+  /// - `None`：本来就是用户在跑的，不动。
+  ///
+  /// 调用方是看门狗线程：校准**有独立超时**（`calib` 内部 deadline + 这里的硬上限），
+  /// 所以这里一定会被调到——不会出现「临时会话一直跑着」。
+  pub fn finish_temp_session(&self, temp: Option<u64>) {
+    let Some(epoch) = temp else {
+      return;
+    };
+    if !self.untouched_since(epoch) {
+      self
+        .hub
+        .push_ui("info", "校准期间引擎被改动过，保留当前运行状态".into());
+      return;
+    }
+    self.stop();
+    self
+      .hub
+      .push_ui("info", "校准完成，已停掉临时启动的会话".into());
   }
 
   /// 应用新计划：保存配置；运行中则重建会话（结构性变更），停止时只存计划。
@@ -291,5 +371,89 @@ impl AudioManager {
     g.session = Some(new_session);
     g.plan = plan;
     Ok(problems)
+  }
+
+  /// 热参数落盘（**不重建会话**，DESIGN.md §5）：音量 / 续播位置等改动用它。
+  /// 同时更新内存计划，保证 `get_plan` 与运行中实例一致。
+  pub fn persist_plan(&self, plan: Plan) -> Result<(), String> {
+    let _rebuild = self.rebuild.lock().unwrap();
+    let _ = config::save_plan(&plan);
+    self.state.lock().unwrap().plan = plan;
+    Ok(())
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  /// 测试用的管理器：**自给自足的计划**。
+  ///
+  /// `AudioManager::new` 读的是用户真实的 `~/.purevox/session.json`，直接用会让测试
+  /// 依赖本机配置（本机若有 AEC 行 / 选了真实设备，断言就会飘）。这里一律换成
+  /// `Plan::default()`：一条输入 + 一条输出，都不指定设备。
+  fn mgr() -> AudioManager {
+    let m = AudioManager::new(crate::debug::DebugHub::new());
+    m.persist_plan(Plan::default()).expect("写入测试计划");
+    m
+  }
+
+  /// 临时会话的收尾纪律：`Some(epoch)` 只在**代号没变**时才停回原状。
+  ///
+  /// 校准期间用户自己点了「启动」就会推高代号；那时若还照停，会把用户刚起的会话
+  /// 也停掉——这比「临时会话没收干净」严重得多。
+  #[test]
+  fn finish_temp_session_respects_run_epoch() {
+    let m = mgr();
+    assert!(!m.is_running(), "起点应是未运行");
+    m.start().expect("启动会话");
+    let epoch = m.run_epoch();
+    assert!(m.untouched_since(epoch));
+
+    // 用户在校准期间自己启停了一次 → 代号变了
+    m.stop();
+    m.start().expect("用户自己重新启动");
+    assert_ne!(m.run_epoch(), epoch, "启停必须推高代号");
+    assert!(!m.untouched_since(epoch), "代号变了就不能再由我们停");
+
+    m.finish_temp_session(Some(epoch));
+    assert!(m.is_running(), "期间被用户改动过 → 必须保留用户的运行状态");
+    m.stop();
+  }
+
+  #[test]
+  fn finish_temp_session_is_noop_for_user_started_session() {
+    let m = mgr();
+    m.start().expect("启动会话");
+    // None = 本来就是用户在跑的会话，什么都不做
+    m.finish_temp_session(None);
+    assert!(m.is_running(), "不该停掉用户自己启动的会话");
+    m.stop();
+  }
+
+  #[test]
+  fn finish_temp_session_stops_untouched_temp_session() {
+    let m = mgr();
+    m.start().expect("临时启动");
+    let epoch = m.run_epoch();
+    m.finish_temp_session(Some(epoch));
+    assert!(
+      !m.is_running(),
+      "临时会话测完必须停回未运行，不能一直占着音频设备"
+    );
+  }
+
+  /// 校准**不必先手动启动**：没有 AEC 行时报的是「没有 AEC 行」而不是「会话未运行」，
+  /// 说明前置检查排在临时启动之前，不会白启一次会话。
+  #[test]
+  fn calibrate_without_aec_row_reports_row_problem_not_running() {
+    let m = mgr();
+    // **必须自给自足的计划**：`AudioManager::new` 读的是用户真实的 `~/.purevox/session.json`，
+    // 直接拿来断言会被本机配置带偏（上面就踩过：本机若有 AEC 行，这个测试会意外通过）。
+    // `Plan::default()` = 一条输入 + 一条输出，没有 AEC 行。
+    m.persist_plan(Plan::default()).expect("写入测试计划");
+    let e = m.calibrate_aec_delay().expect_err("没有 AEC 行应当报错");
+    assert!(e.contains("AEC"), "应报缺 AEC 行，实际：{e}");
+    assert!(!m.is_running(), "前置检查失败不该留下运行中的会话");
   }
 }

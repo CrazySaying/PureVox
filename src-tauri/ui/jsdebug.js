@@ -34,7 +34,9 @@
 
   window.addEventListener('error', (e) => {
     const where = `${(e.filename || '').split('/').pop()}:${e.lineno || ''}`
-    send('error', `${e.message || e.error} @ ${where}`)
+    // 带上错误对象自己的 stack（哪一行抛的）；只报 message 的话前端报错根本没法定位
+    const st = e.error && e.error.stack ? String(e.error.stack).split('\n').slice(0, 4).join(' ⏎ ') : ''
+    send('error', `${e.message || e.error} @ ${where}${st ? ' ⏎ ' + st : ''}`)
   })
   window.addEventListener('unhandledrejection', (e) => {
     const r = /** @type {any} */ (e.reason)

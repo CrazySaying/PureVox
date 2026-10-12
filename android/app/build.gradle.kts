@@ -30,8 +30,11 @@ android {
         applicationId = "com.purevox.mic"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        // 版本名可由 CI 传入（`-PpvVersion=<tag/日期>`，见 tools/automation/version.sh）；本机默认 1.0。
+        // versionCode 必须**单调递增**才能让应用内更新检查判出新旧，故取 `yyMMddHHmm`
+        // （如 2610081430，int32 内）。由 CI 传入（`-PpvVersionCode=`，见
+        // tools/automation/version.sh 的 ACODE）；本机默认 1。
+        versionCode = ((findProperty("pvVersionCode") as String?)?.toIntOrNull() ?: 1)
+        // 版本名 = 年.月.日，由 CI 传入（`-PpvVersion=`，见 tools/automation/version.sh）；本机默认 1.0。
         versionName = (findProperty("pvVersion") as String?) ?: "1.0"
     }
 

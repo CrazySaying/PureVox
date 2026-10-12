@@ -25,13 +25,12 @@ use std::thread::JoinHandle;
 use crate::debug::SharedHub;
 
 pub(super) fn spawn(
-  _bits: u32,
-  _vk: u32,
-  spec: String,
+  bindings: Vec<super::Resolved>,
   hub: SharedHub,
   _stop: Arc<AtomicBool>,
-  _on_trigger: Arc<dyn Fn() + Send + Sync>,
 ) -> Option<JoinHandle<()>> {
-  hub.push_ui("unavailable", format!("全局热键仅 Windows 支持：{spec}"));
+  for (spec, ..) in &bindings {
+    hub.push_ui("unavailable", format!("全局热键仅 Windows 支持：{spec}"));
+  }
   None
 }

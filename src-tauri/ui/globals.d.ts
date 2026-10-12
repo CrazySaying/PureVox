@@ -39,7 +39,27 @@ interface Window {
   /** 驱动面板平台实现（drivers_linux.js / drivers_windows.js 注册，drivers.js 按平台取用） */
   __pvDriversLinux?: PvDriversImpl
   __pvDriversWindows?: PvDriversImpl
+  /** 媒体处理行界面（media.js 注册，columns.js 调用） */
+  __pvMedia?: PvMediaImpl
+  /** 二维码（qrcode.js = 内嵌的第三方库 qrcode-generator v1.4.4，MIT）。
+   *  库里那份是上游老式写法、过不了 checkJs，已在 jsconfig.json 里 exclude，
+   *  所以这里的类型是手写的。 */
+  __pvQr?: PvQrImpl
+  /** 网络行卡片（netrow.js 注册，columns.js 调用）：状态灯 / 启停重启 / 地址 / 二维码 */
+  __pvNetRow?: { attach(el: HTMLElement, ci: number, ri: number, row: any): boolean; reset(): void }
   // 语言切换后各模块重渲染：在 document 上监听 'pv-langchange'（i18n.js 派发）
+}
+
+/** 二维码封装（qrcode.js 文件末尾的 PureVox 包装，第三方库本体在它上面）。 */
+interface PvQrImpl {
+  /** 生成矩阵。注意库里不暴露掩码号，别去读。 */
+  encode(text: string, ecl?: 'L' | 'M' | 'Q' | 'H'): { size: number; isDark: (r: number, c: number) => boolean }
+  /** 渲染到 canvas（自定像素比例 / 留白 / 配色） */
+  render(
+    text: string,
+    canvas: HTMLCanvasElement,
+    opt?: { scale?: number; margin?: number; dark?: string; light?: string; ecl?: string }
+  ): { size: number; isDark: (r: number, c: number) => boolean }
 }
 
 /** 「驱动」面板的平台实现（见 ui/drivers.js 外壳）。 */
@@ -52,6 +72,23 @@ interface PvDriversImpl {
   mount(body: HTMLElement): void
   /** 重新拉取状态并重绘 */
   refresh(): void
+}
+
+/** 媒体处理行的界面模块（media.js 注册，columns.js 在渲染行时调用）。 */
+interface PvMediaImpl {
+  /**
+   * 给一行媒体处理行（soundpad / player）补上控制区并登记到 2 Hz 状态轮询。
+   * @returns true = 确实是媒体行（调用方据此加高行）
+   */
+  attach(
+    rowEl: HTMLElement,
+    col: number,
+    row: number,
+    spec: { ptype: string; params: Record<string, string> },
+    rerender: { apply: () => void }
+  ): boolean
+  /** 清空挂载表（整表重渲染时调用，避免引用已丢弃的 DOM） */
+  reset(): void
 }
 
 /** 调试快照（结构见 Rust `DebugSnapshot`；前端只做宽松声明，字段按需取用）。 */

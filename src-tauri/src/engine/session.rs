@@ -31,6 +31,7 @@ use rtrb::Consumer;
 
 use super::aec::{AecRow, FAR_HIST_SAMPLES, FarHistory, FarWin, spawn_far_pump};
 use super::calib::CalibHub;
+use super::media::{self, MediaCmd, MediaSlot};
 use super::registry::{self, ParamValue, Params};
 use super::stage::{FrameContext, Stage, StageError};
 use crate::audio::fanout::Fanout;
@@ -52,6 +53,8 @@ struct Row {
   kind: RowKind,
   label: String,
   enabled: bool,
+  /// 上一次的 enabled（列工作线程据此把开关翻转转发给媒体行）
+  enabled_prev: bool,
   error: Option<String>,
   /// 未配置（如未选择设备）：不是错误，只是还没配好
   unconfigured: bool,
@@ -60,12 +63,16 @@ struct Row {
   inf_max_ms: f32,
   /// 输入行：本行源的 48k hop 读端
   input: Option<Consumer<f32>>,
+  /// 输入行（loopback）：行内增益（系统混音偏响，默认 -6 dB）
+  gain: Option<f32>,
   /// AEC 输入行：mic 读端 + far 历史 + 本行模型状态
   aec: Option<AecRow>,
   /// `remote_mic` 输入行：网络入站队列（DESIGN.md §4.1）
   net_input: Option<Arc<crate::net::NetHub>>,
   /// 处理行
   stage: Option<Box<dyn Stage>>,
+  /// 媒体行（soundpad / player）：运行时命令通道（界面经 MediaHub 寻址）
+  media_slot: Option<Arc<MediaSlot>>,
   /// 输出行：本行扇出（该行的播放线程从这里订阅）
   output: Option<Arc<Fanout>>,
   /// `remote_speaker` 输出行：推给网络中枢（无扇出、无播放线程）
@@ -97,6 +104,8 @@ impl Session {
     calib: Arc<CalibHub>,
   ) -> (Session, Vec<String>) {
     let mut problems = crate::plan::validate(plan);
+    // 媒体槽位按 (列,行) 重建：先清空旧会话的注册，避免行被删后残留
+    media::hub().clear();
     let mut columns = Vec::new();
     for (i, spec) in plan.columns.iter().enumerate() {
       columns.push(build_column(&hub, i, spec, &mut problems, &rec, &calib));
@@ -148,6 +157,8 @@ impl Session {
       }
     }
     self.columns.clear();
+    // 媒体槽位随会话释放（界面再发命令只会得到「未运行」）
+    media::hub().clear();
   }
 }
 
@@ -197,14 +208,17 @@ fn build_column(
       kind: r.kind,
       label: r.ptype.clone(),
       enabled: r.enabled,
+      enabled_prev: r.enabled,
       error: None,
       unconfigured: false,
       inf_ms: 0.0,
       inf_max_ms: 0.0,
       input: None,
+      gain: None,
       aec: None,
       net_input: None,
       stage: None,
+      media_slot: None,
       output: None,
       net_output: false,
     };
@@ -330,14 +344,43 @@ fn build_column(
         row.input = Some(crate::audio::tone::shared().subscribe(&format!("col{idx}row{ri}")));
       }
       RowKind::Input if r.ptype == "remote_mic" => {
-        // 手机麦克风：不需要虚拟声卡驱动，网络流直接进引擎（DESIGN.md §4.1）
+        // 网络麦克风：不需要虚拟声卡驱动，网络流直接进引擎（DESIGN.md §4.1）
         // 允许一个：入站是单队列，多行会互相抢样本
         if remote_mic_used {
-          row.error = Some("手机麦克风只允许一个输入行".into());
+          row.error = Some("网络麦克风只允许一个输入行".into());
         } else {
           remote_mic_used = true;
-          row.label = "手机麦克风（网络）".into();
+          row.label = "网络麦克风".into();
           row.net_input = Some(crate::net::hub().clone());
+        }
+      }
+      RowKind::Input if r.ptype == "loopback" => {
+        // 电脑播放音频：捕获输出设备正在播放的系统混音（复用 AEC 的回环采集）。
+        // `device` = `loopback`（默认输出）/ `loopback:<端点ID｜sink>`；行内增益默认 -6 dB。
+        let db: f64 = r
+          .params
+          .get("volume_db")
+          .and_then(|v| v.trim().parse().ok())
+          .unwrap_or(-6.0);
+        row.gain = Some(10f32.powf((db / 20.0) as f32));
+        let target = match device {
+          None => None,
+          Some(d) if d == "loopback" || d.is_empty() => None,
+          Some(d) => Some(d.strip_prefix("loopback:").unwrap_or(d).to_string()),
+        };
+        let name = match &target {
+          None => "系统默认输出".to_string(),
+          Some(id) => crate::devices::find(id, false)
+            .map(|(_, n)| n)
+            .unwrap_or_else(|_| id.clone()),
+        };
+        row.label = format!("电脑播放音频（{name}）");
+        match loopback::spawn(hub.clone(), target, format!("c{idx}r{ri}")) {
+          Ok(cap) => {
+            row.input = Some(cap.fanout.subscribe(&format!("col{idx}row{ri}")));
+            captures.push(cap.handle);
+          }
+          Err(e) => row.error = Some(e),
         }
       }
       RowKind::Input => match device {
@@ -356,18 +399,27 @@ fn build_column(
           }
         },
       },
-      RowKind::Process => match registry::create_stage(&r.ptype, &to_params(&r.params)) {
-        Ok(st) => {
-          row.label = registry::get_spec(&r.ptype)
-            .map(|s| s.label.to_string())
-            .unwrap_or(r.ptype.clone());
-          row.stage = Some(st);
+      RowKind::Process => {
+        // 媒体行（音效板 / 播放器）：注册 (列,行) 槽位，供界面投递运行时命令
+        let slot = match r.ptype.as_str() {
+          "soundpad" => Some(media::hub().register(idx, ri, "soundpad")),
+          "player" => Some(media::hub().register(idx, ri, "player")),
+          _ => None,
+        };
+        row.media_slot = slot.clone();
+        match registry::create_stage(&r.ptype, &to_params(&r.params), slot) {
+          Ok(st) => {
+            row.label = registry::get_spec(&r.ptype)
+              .map(|s| s.label.to_string())
+              .unwrap_or(r.ptype.clone());
+            row.stage = Some(st);
+          }
+          Err(e) => row.error = Some(e),
         }
-        Err(e) => row.error = Some(e),
-      },
+      }
       RowKind::Output if r.ptype == "remote_speaker" => {
-        // 手机扬声器：按位置 tap 取信号，交给网络中枢广播给订阅客户端
-        row.label = "手机扬声器（网络）".into();
+        // 网络扬声器：按位置 tap 取信号，交给网络中枢广播给订阅客户端
+        row.label = "网络扬声器".into();
         row.net_output = true;
       }
       RowKind::Output => match device {
@@ -457,6 +509,13 @@ fn run_column(
       let calibrating = calib.active();
 
       for (ri, r) in g.iter_mut().enumerate() {
+        // 行启用开关翻转 → 转发给媒体行（音效板淡出在播声部；播放器硬旁路）
+        if r.enabled != r.enabled_prev {
+          r.enabled_prev = r.enabled;
+          if let Some(slot) = r.media_slot.as_ref() {
+            slot.send(MediaCmd::Enabled(r.enabled));
+          }
+        }
         match r.kind {
           RowKind::Input => {
             if let Some(aec) = r.aec.as_mut() {
@@ -542,7 +601,7 @@ fn run_column(
                 }
               }
             } else if let Some(net) = r.net_input.as_ref() {
-              // 手机麦克风：按引擎 10 ms 节拍从网络队列取一个 hop（欠载补静音）
+              // 网络麦克风：按引擎 10 ms 节拍从网络队列取一个 hop（欠载补静音）
               net.take_rx_hop(&mut tmp);
               for i in 0..HOP {
                 acc[i] += tmp[i] * k;
@@ -550,6 +609,12 @@ fn run_column(
             } else if let Some(cons) = r.input.as_mut()
               && take_hop(cons, &mut tmp)
             {
+              // 行内增益（loopback 源：系统混音偏响）
+              if let Some(g) = r.gain {
+                for x in tmp.iter_mut() {
+                  *x *= g;
+                }
+              }
               for i in 0..HOP {
                 acc[i] += tmp[i] * k;
               }
@@ -587,7 +652,7 @@ fn run_column(
                 f.push_hop(&acc);
               }
               if r.net_output {
-                // 手机扬声器：位置 tap（放到哪一行就取到哪里的信号）
+                // 网络扬声器：位置 tap（放到哪一行就取到哪里的信号）
                 crate::net::hub().push_tx_hop(&acc);
               }
             }

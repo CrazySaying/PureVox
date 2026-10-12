@@ -81,6 +81,17 @@ impl CalibHub {
     matches!(*self.state.lock().unwrap(), State::Collecting { .. })
   }
 
+  /// 校准是否**还在进行中**（采集中 **或** 正在算）。
+  ///
+  /// 临时启动会话做校准时用它决定何时收尾停会话——只看 `active()` 会在「已收齐、正在
+  /// 后台算」的那一小段里误判成结束，把列线程拆掉、结果也就算不出来了。
+  pub fn in_flight(&self) -> bool {
+    matches!(
+      *self.state.lock().unwrap(),
+      State::Collecting { .. } | State::Computing
+    )
+  }
+
   /// 开始采集：`seconds` 秒、最大搜索 `max_delay_ms`；`current_delay_ms` = 当前 AEC 行延时。
   pub fn start(
     &self,

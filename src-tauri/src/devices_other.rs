@@ -17,7 +17,7 @@
 
 //! 其它平台（非 Windows / 非 Linux）：不精简；无回环目标（AEC 回环不可用）。
 
-use super::{DeviceInfo, LoopbackTarget};
+use super::{DeviceInfo, DeviceList, LoopbackTarget};
 
 /// 其它平台：无回环能力 → 也不接受裸设备 ID。
 pub(super) const LOOPBACK_ACCEPTS_DEVICE_ID: bool = false;
@@ -26,6 +26,6 @@ pub(super) fn simplify(devices: Vec<DeviceInfo>) -> Vec<DeviceInfo> {
   devices
 }
 
-pub(super) fn loopback_targets() -> Vec<LoopbackTarget> {
+pub(super) fn loopback_targets(_list: &DeviceList) -> Vec<LoopbackTarget> {
   Vec::new()
 }

@@ -22,6 +22,8 @@
 pub mod aec;
 pub mod calib;
 pub mod components;
+/// 媒体控制中枢（音效板 / 播放器的运行时命令与状态，DESIGN.md §4）
+pub mod media;
 pub mod pipeline;
 pub mod registry;
 pub mod session;

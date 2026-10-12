@@ -144,12 +144,16 @@ pub struct DebugSnapshot {
   pub ui: Vec<String>,
   /// 音频引擎是否运行中（启动/停止状态）
   pub running: bool,
+  /// 设备刷新状态（正在刷 / 上次成功于 / 上次耗时 / 上次失败原因）
+  pub device_refresh: crate::devices::RefreshState,
   /// TSE 参考录音状态/进度
   pub recorder: Probe<String>,
   /// AEC 延时校准状态/结果
   pub calib: Probe<String>,
   /// 网络（手机 ⇄ 电脑，DESIGN.md §4.1）：端口、客户端数、进出计数、远程输入开关、Opus 探测
   pub net: crate::net::hub::NetStats,
+  /// 更新检查（GitHub Releases）：阶段、本机版本 / 最新 tag、下载进度、失败原因
+  pub update: crate::update::Status,
   /// Linux 虚拟麦克风（PipeWire）状态；非 Linux 或不可用时为 unavailable + 原因
   pub virtual_mic: Probe<crate::audio::virtual_mic::Status>,
 }
@@ -294,9 +298,11 @@ impl DebugHub {
       devices,
       ui: st_ui,
       running: st_running,
+      device_refresh: crate::devices::refresh_state(),
       recorder: st_recorder,
       calib: st_calib,
       net: crate::net::hub().stats(),
+      update: crate::update::status(),
       virtual_mic: st_virtual_mic,
     }
   }

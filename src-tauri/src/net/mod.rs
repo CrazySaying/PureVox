@@ -18,8 +18,8 @@
 //! 网络子系统（DESIGN.md §4.1）：手机 ⇄ 电脑。
 //!
 //! 三条互不依赖的能力，共用一个 WebSocket 服务：
-//! 1. `remote_mic` 输入行 —— 手机麦克风当电脑麦克风（进引擎全链，可降噪）
-//! 2. `remote_speaker` 输出行 —— 手机扬声器当电脑音箱
+//! 1. `remote_mic` 输入行 —— 网络麦克风：手机麦克风当电脑麦克风（进引擎全链，可降噪）
+//! 2. `remote_speaker` 输出行 —— 网络扬声器：手机当电脑音箱
 //! 3. 远程输入 —— 手机输入法打字（`text`）+ 手机实体键当全尺寸键盘（`key`），默认关闭
 //!
 //! **平台**：传输与编解码跨平台（axum + tokio + 运行时加载的 libopus）；
@@ -37,8 +37,9 @@ mod diag;
 mod loopback;
 pub mod proto;
 pub mod server;
+pub mod webclient;
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 pub use hub::NetHub;
 
@@ -55,6 +56,11 @@ pub fn hub() -> Arc<NetHub> {
 /// 是两回事。远程输入另有独立开关（默认关）。
 const BIND_ADDR: [u8; 4] = [0, 0, 0, 0];
 
+/// 监听任务句柄。**必须留着**：以前 `stop()` 只清状态位，监听任务还在跑，于是
+/// 「停止服务」根本不生效，改端口后重启也必然 `address in use`——界面按钮看着能用，
+/// 其实什么也没做。重启服务要能真的换掉监听，就靠 abort 这个任务。
+static TASK: Mutex<Option<tauri::async_runtime::JoinHandle<()>>> = Mutex::new(None);
+
 /// 启动服务（幂等）。返回绑定结果说明；端口占用等失败原因进调试接口，不静默失败。
 pub fn start() -> Result<String, String> {
   let h = hub();
@@ -63,10 +69,12 @@ pub fn start() -> Result<String, String> {
   }
   // 缺 opus.dll 时先报出来：网络功能没有编解码器就是死的
   opus_sys::probe()?;
+  // 上一次没走 stop()（比如启动后崩过）时先收干净，否则端口还占着
+  stop();
   let app = server::router(h.clone());
   let addr = std::net::SocketAddr::from((BIND_ADDR, proto::PORT));
   let hh = h.clone();
-  tauri::async_runtime::spawn(async move {
+  let handle = tauri::async_runtime::spawn(async move {
     match tokio::net::TcpListener::bind(addr).await {
       Ok(listener) => {
         hh.set_running(true);
@@ -81,6 +89,7 @@ pub fn start() -> Result<String, String> {
       }
     }
   });
+  *TASK.lock().map_err(|_| "服务锁已中毒".to_string())? = Some(handle);
   Ok(format!(
     "已启动，监听 {}:{}（局域网可达）",
     addr.ip(),
@@ -88,12 +97,23 @@ pub fn start() -> Result<String, String> {
   ))
 }
 
-/// 停服务（幂等）。
+/// 停服务（幂等）：真的 abort 掉监听任务，不只是清状态位。
 pub fn stop() {
-  // 监听任务在进程内以 abort 方式结束由 main 的退出流程处理；这里只清状态
   let h = hub();
   h.set_remote_input(false);
   h.set_running(false);
+  // 锁中毒时不能 panic：停服务是在退出路径上调用的，宁可漏停也不能崩。
+  if let Ok(mut slot) = TASK.lock()
+    && let Some(handle) = slot.take()
+  {
+    handle.abort();
+  }
+}
+
+/// 重启服务：先真的停，再起。端口占用 / 改端口后用它生效。
+pub fn restart() -> Result<String, String> {
+  stop();
+  start()
 }
 
 /// 服务状态文字（界面与调试接口共用）。

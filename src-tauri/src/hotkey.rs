@@ -15,7 +15,11 @@
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! 全局热键（仅 Windows）：`RegisterHotKey` + 轮询消息队列，切换「启动 / 停止」。
+//! 全局热键（仅 Windows）：`RegisterHotKey` + 轮询消息队列。
+//!
+//! 一组绑定同时注册：① 启停热键（设置里的「全局热键」）、② 每个音效一个触发键
+//! （音效板处理行里逐个录制，同 legacy `uitk/main_window.py` 的 `pad:<i>` 语义）。
+//! **一个线程管全部绑定**（`RegisterHotKey` 的 id 按序号分配），避免 N 个音效开 N 个线程。
 //!
 //! 键位一律用规范字符串表达，修饰键顺序固定 `Ctrl+Alt+Shift+Win`，如
 //! `Ctrl+Alt+1` / `Alt+.` / `F8`；**空串 = 不监听**。字母/数字必须带至少一个
@@ -175,32 +179,46 @@ pub fn normalize_spec(spec: &str) -> String {
   parts.join("+")
 }
 
-/// 一个正在监听的热键线程。
+/// 一条热键绑定：规范键位串（空串忽略）+ 按下时的回调。
+pub type Binding = (String, Arc<dyn Fn() + Send + Sync>);
+
+/// 已解析、校验通过的绑定（交给平台实现注册）：(规范串, 修饰位, 虚拟键码, 回调)。
+pub type Resolved = (String, u32, u32, Arc<dyn Fn() + Send + Sync>);
+
+/// 一个正在监听的热键线程（管一组绑定，见 [`Binding`]）。
 pub struct Hotkeys {
   stop: Arc<AtomicBool>,
   join: Option<JoinHandle<()>>,
 }
 
 impl Hotkeys {
-  /// 注册并启动监听；`spec` 为空则不监听（返回空句柄）。注册结果写进调试接口。
-  pub fn start(spec: &str, hub: SharedHub, on_trigger: Arc<dyn Fn() + Send + Sync>) -> Self {
-    let spec = spec.trim().to_string();
+  /// 注册并启动监听整组绑定；`bindings` 全为空串则不监听（返回空句柄）。
+  /// 非法 / 被占用的键位跳过并写进调试接口 `ui`（**不静默**，逐条报错）。
+  pub fn start(bindings: Vec<Binding>, hub: SharedHub) -> Self {
     let stop = Arc::new(AtomicBool::new(false));
-    if spec.is_empty() {
+    let mut ok: Vec<Resolved> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    for (spec, cb) in bindings {
+      let spec = spec.trim().to_string();
+      if spec.is_empty() {
+        continue;
+      }
+      let Some((bits, vk)) = parse_spec(&spec) else {
+        hub.push_ui("error", format!("热键键位无效：{spec}"));
+        continue;
+      };
+      // 同一键位注册两次必然第二个失败（还被占用），提前拦下给个能看懂的提示
+      if seen.contains(&spec) {
+        hub.push_ui("error", format!("热键重复：{spec}"));
+        continue;
+      }
+      seen.push(spec.clone());
+      ok.push((spec, bits, vk, cb));
+    }
+    if ok.is_empty() {
       return Hotkeys { stop, join: None };
     }
-    let Some((bits, vk)) = parse_spec(&spec) else {
-      hub.push_ui("error", format!("热键键位无效：{spec}"));
-      return Hotkeys { stop, join: None };
-    };
-    let join = imp::spawn(
-      bits,
-      vk,
-      spec.clone(),
-      hub.clone(),
-      stop.clone(),
-      on_trigger,
-    );
+    let join = imp::spawn(ok, hub, stop.clone());
     Hotkeys { stop, join }
   }
 

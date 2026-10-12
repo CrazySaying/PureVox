@@ -17,7 +17,7 @@
 
 //! Windows 的设备面：WASAPI/MME 枚举本就干净（不精简）；可回环目标是各 WASAPI 输出端点。
 
-use super::{DeviceInfo, LoopbackTarget};
+use super::{DeviceInfo, DeviceList, LoopbackTarget};
 
 /// Windows：回环目标就是 WASAPI 输出端点，`far_device` 可以填裸输出设备 ID。
 pub(super) const LOOPBACK_ACCEPTS_DEVICE_ID: bool = true;
@@ -28,15 +28,15 @@ pub(super) fn simplify(devices: Vec<DeviceInfo>) -> Vec<DeviceInfo> {
 }
 
 /// 可回环的输出设备（`loopback:<wasapi 端点 ID>`）。
-pub(super) fn loopback_targets() -> Vec<LoopbackTarget> {
-  let mut v = Vec::new();
-  for d in super::enumerate().devices {
-    if d.direction == "output" {
-      v.push(LoopbackTarget {
-        id: format!("loopback:{}", d.id),
-        name: d.name,
-      });
-    }
-  }
-  v
+/// 入参是**已枚举好的列表**（由 `devices::loopback_targets` 统一给），本平台不再自己枚举。
+pub(super) fn loopback_targets(list: &DeviceList) -> Vec<LoopbackTarget> {
+  list
+    .devices
+    .iter()
+    .filter(|d| d.direction == "output")
+    .map(|d| LoopbackTarget {
+      id: format!("loopback:{}", d.id),
+      name: d.name.clone(),
+    })
+    .collect()
 }

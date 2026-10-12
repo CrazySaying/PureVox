@@ -19,7 +19,7 @@
 
 use std::collections::HashMap;
 
-use super::{DeviceInfo, LoopbackTarget};
+use super::{DeviceInfo, DeviceList, LoopbackTarget};
 
 /// Linux 的回环是 Pulse sink 的 monitor：**不接受裸 ALSA 设备 ID**。
 pub(super) const LOOPBACK_ACCEPTS_DEVICE_ID: bool = false;
@@ -85,7 +85,10 @@ pub(super) fn simplify(devices: Vec<DeviceInfo>) -> Vec<DeviceInfo> {
 
 /// 可回环的 PipeWire/Pulse sinks（`pactl list sinks` 的 Name/Description）。
 /// **必须 `LC_ALL=C`**：中文 locale 下 pactl 会输出「名称/描述」，按 `Name:` 解析会得到 0 个。
-pub(super) fn loopback_targets() -> Vec<LoopbackTarget> {
+///
+/// 入参是已枚举好的**设备**列表（Linux 的 sink 由 pactl 给，不在 cpal 列表里），保留是为了
+/// 与其它平台同一签名；这里不用它，但仍**不该自己去枚举 cpal 设备**（那会和刷新抢驱动）。
+pub(super) fn loopback_targets(_list: &DeviceList) -> Vec<LoopbackTarget> {
   let mut v = Vec::new();
   if let Ok(out) = std::process::Command::new("pactl")
     .env("LC_ALL", "C")

@@ -16,6 +16,10 @@ PureVox is being migrated from Python + Tkinter to **Tauri 3**. The mainline is 
 
 ## License
 
-- Source code: GPL-3.0-or-later, see [LICENSE](LICENSE).
+- Source code: GPL-3.0-or-later. `LICENSE` is the **verbatim, unmodified GPL-3.0 text
+  published by the FSF**; the project's own copyright line lives only in the source
+  file headers and in this section, never in `LICENSE` itself.
+- Copyright (C) 2024-2026 a2heng <752848283@qq.com>
+- Per-dependency notices are in [LICENSE-THIRD-PARTY.txt](LICENSE-THIRD-PARTY.txt).
 - The built-in AI models (`models/*.onnx`) are not covered by the GPL, see [MODEL-LICENSE.md](MODEL-LICENSE.md).
 - The author also publishes MIT-licensed models free to use: `lightweight-denoise-48k` / `lightweight-aec-48k`.

@@ -1,0 +1,309 @@
+// PureVox — AI 麦克风降噪工具
+// Copyright (C) 2024-2026 a2heng <752848283@qq.com>
+//
+// PureVox is licensed under the GNU General Public License v3.0 or
+// later (GPL-3.0-or-later).  See LICENSE for details.
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// The built-in AI models are NOT covered by the GPL; they are the
+// property of a2heng and may only be used with PureVox under
+// authorization.  See MODEL-LICENSE.md for details.
+//
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+//! 网页版客户端（DESIGN.md §4.1）：网络行卡片里的二维码指向这里。
+//!
+//! **为什么要有**：二维码扫的是**网页地址**（`http://<ip>:59123/`），不是 `ws://`
+//! ——扫 `ws://` 手机只会把它当一串文本，什么也不会发生。网页版的功能与 APK 对等：
+//! 麦克风上行、扬声器下行、打字、全尺寸键盘，所以「手机客户端」不该是个独立概念，
+//! 浏览器只是其中一种客户端。
+//!
+//! **为什么不引编解码库**：Opus 用浏览器**内置的 WebCodecs**（`AudioEncoder` /
+//! `AudioDecoder`，codec `'opus'`），与 Rust 侧 `net/opus_sys.rs` 运行时加载
+//! libopus 是同一个思路：不新增 C 编译链，不往产物里塞一份 wasm。
+//!
+//! 服务端**什么都不解析**：这页是纯静态资源，协议仍只有 `/ws` 那一套
+//! （`proto.rs`），所以网页版与 APK 走的是同一条链路、同一种节拍。
+
+/// 网页版客户端页面。整页自包含（无外链、无构建），直接内联进二进制。
+pub const PAGE: &str = r##"<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#101418">
+<title>PureVox</title>
+<style>
+:root{--bg:#101418;--fg:#e8edf2;--mut:#93a1b0;--ok:#3ddc84;--warn:#ffb454;--err:#ff5f56;--line:#26313d}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;
+  padding:max(12px,env(safe-area-inset-top)) 12px calc(20px + env(safe-area-inset-bottom))}
+h1{font-size:17px;margin:0 0 2px}
+.sub{color:var(--mut);font-size:12px;margin-bottom:12px}
+.bar{display:flex;align-items:center;gap:8px;background:#18202a;border:1px solid var(--line);
+  border-radius:10px;padding:9px 11px;margin-bottom:10px}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--mut);flex:0 0 auto}
+.dot.on{background:var(--ok)} .dot.err{background:var(--err)} .dot.warn{background:var(--warn)}
+#st{font-size:12px;color:var(--mut);min-width:0;overflow-wrap:anywhere}
+.rtt{margin-left:auto;color:var(--mut);font-size:11px;flex:0 0 auto}
+button{font:inherit;color:var(--fg);background:#202a36;border:1px solid var(--line);
+  border-radius:9px;padding:10px 12px;cursor:pointer;flex:1 1 0;min-width:0}
+button:active{transform:translateY(1px)}
+button.pri{background:#1d5c3a;border-color:#2b7d51}
+button[aria-pressed=true]{background:#1d5c3a;border-color:#2b7d51}
+button:disabled{opacity:.45}
+.row{display:flex;gap:8px;margin-bottom:10px}
+.note{color:var(--mut);font-size:12px;margin:10px 2px 4px}
+.warnbox{border:1px solid #5a4a20;background:#241f12;color:#f0d9a8;border-radius:10px;
+  padding:10px 11px;font-size:12px;margin-bottom:10px}
+input[type=text]{font:inherit;width:100%;color:var(--fg);background:#18202a;border:1px solid var(--line);
+  border-radius:9px;padding:11px 12px}
+.keys{display:none;position:fixed;inset:0;background:#0c1014;z-index:9;overflow:auto;
+  padding:max(10px,env(safe-area-inset-top)) 10px calc(10px + env(safe-area-inset-bottom))}
+.keys.on{display:block}
+.keys .kb{margin:0 auto;max-width:520px}
+.krow{display:flex;gap:5px;margin-bottom:5px}
+.krow .k{flex:1;min-width:0;padding:12px 2px;text-align:center;font-size:12px;border-radius:7px;
+  background:#1b242e;border:1px solid var(--line);user-select:none;touch-action:none}
+.krow .k.w2{flex:2} .krow .k.w3{flex:3}
+.krow .k.act{background:#1d5c3a}
+</style>
+
+<h1>PureVox</h1>
+<div class="sub" id="pc"></div>
+
+<div class="bar"><span class="dot" id="dot"></span><span id="st">未连接</span><span class="rtt" id="rtt"></span></div>
+
+<div class="warnbox" id="warn">
+  同网段直连且<strong>无鉴权</strong>：开启远程输入后，同一 Wi-Fi 下的任何设备都能向这台电脑打字和发按键。
+</div>
+
+<div class="row">
+  <button id="bMic" aria-pressed="false">麦克风</button>
+  <button id="bSpk" aria-pressed="false">扬声器</button>
+</div>
+<div class="row">
+  <button id="bKb" style="flex:1">键盘 / 打字</button>
+</div>
+<div class="note" id="hint"></div>
+
+<input type="text" id="text" placeholder="在此打字，发到电脑…" autocomplete="off" enterkeyhint="send">
+<div class="note">用系统的「全键盘」发送按键可能比这排虚拟键好用；两���可以并用。</div>
+
+<div class="keys" id="kb"><div class="kb">
+  <div class="krow" id="r0"></div><div class="krow" id="r1"></div>
+  <div class="krow" id="r2"></div><div class="krow" id="r3"></div>
+  <div class="krow" id="r4"></div>
+  <button id="bClose" style="width:100%;margin-top:8px">收起</button>
+</div></div>
+
+<script>
+"use strict";
+// ---- 与 Rust 侧 proto.rs 保持一致的协议（只有 /ws 这一套） ----
+const SR = 48000, HOP = 480;
+const st = document.getElementById('st'), dot = document.getElementById('dot');
+const hint = document.getElementById('hint');
+document.getElementById('pc').textContent = location.host;
+
+let ws = null, micOn = false, spkOn = false;
+let enc = null, dec = null, actx = null, micNode = null, spkGain = null;
+let txQueue = [], playAt = 0, frameMs = 10, ready = false;
+
+function say(t, cls) { st.textContent = t; dot.className = 'dot ' + (cls || ''); }
+function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
+function sendBin(b) { if (ws && ws.readyState === 1 && b) ws.send(b); }
+
+// ---- 连接 ----
+function connect() {
+  const u = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
+  say('连接中…', 'warn');
+  ready = false;
+  ws = new WebSocket(u);
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => {
+    // 握手是**必须**的（proto.rs：`proto` 不等于 PROTO 服务端直接回 err 断开）。
+    send({ t: 'hello', proto: 1 });
+  };
+  ws.onclose = () => { say('已断开，3 秒后重连', 'err'); setTimeout(connect, 3000); };
+  ws.onerror = () => { /* onclose 会接手 */ };
+  ws.onmessage = (ev) => {
+    if (typeof ev.data === 'string') {
+      let m; try { m = JSON.parse(ev.data); } catch { return; }
+      if (m.t === 'ready') {
+        ready = true; frameMs = m.frame_ms || 10;
+        say('已连接 · ' + m.rate + ' Hz · ' + m.frame_ms + ' ms/帧', 'on');
+        if (micOn && !enc) startMic();
+        if (spkOn && !dec) startSpk();
+      } else if (m.t === 'pong') {
+        const t0 = pingAt[m.id];
+        if (t0) { const rtt = Math.round(performance.now() - t0);
+                  pingAt[m.id] = 0; send({ t: 'rtt', ms: rtt }); rttEl.textContent = rtt + ' ms'; }
+      } else if (m.t === 'err') {
+        say('服务端拒绝：' + m.msg, 'err');
+      }
+      return;
+    }
+    const b = new Uint8Array(ev.data);                   // 二进制 = Opus 包
+    if (spkOn && dec && ready && b.length) dec.decode(new EncodedAudioChunk({
+      type: 'key', timestamp: Math.round(playAt * 1e6), data: b }));
+  };
+  // RTT：每 5 秒 ping 一次，服务端原样回 pong；时差自己算好再用 rtt 上报
+  // （proto.rs 的约定：客户端测、服务端不计时，这样 /debug 里能直接看到）
+  clearInterval(pingTimer);
+  pingTimer = setInterval(() => {
+    if (ws && ws.readyState === 1) { const id = ++pingSeq; pingAt[id] = performance.now(); send({ t: 'ping', id }); }
+  }, 5000);
+}
+let pingTimer = null, pingSeq = 0;
+const pingAt = {};
+const rttEl = document.getElementById('rtt');
+
+// ---- 麦克风上行：getUserMedia → AudioWorklet 取 480 样本的 hop → WebCodecs Opus ----
+let workletUrl = null;
+function worklet() {
+  if (workletUrl) return workletUrl;
+  // 内联的 worklet：只把收到的 Float32 拼成 hop 交回主线程，编解码在主线程做。
+  const src = `class H extends AudioWorkletProcessor{
+    constructor(){super();this.buf=new Float32Array(480);this.n=0;}
+    process(inputs){const c=inputs[0]&&inputs[0][0];if(c){
+      for(let i=0;i<c.length;i++){this.buf[this.n++]=c[i];
+        if(this.n===480){const o=this.buf.slice(0);this.port.postMessage(o);this.n=0;}}}
+    return true;}}
+  registerProcessor('hop',H);`;
+  workletUrl = URL.createObjectURL(new Blob([src], { type: 'application/javascript' }));
+  return workletUrl;
+}
+
+async function startMic() {
+  const t = actx ? '已有' : '申请';
+  say('麦克风' + t + '权限…', 'warn');
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: { channelCount: 1, sampleRate: SR, echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+  if (!actx) actx = new AudioContext({ sampleRate: SR });
+  if (actx.state === 'suspended') await actx.resume();
+  await actx.audioWorklet.addModule(worklet());
+  micNode = new AudioWorkletNode(actx, 'hop', { numberOfInputs: 1, numberOfOutputs: 0 });
+  micNode.port.onmessage = (e) => {
+    if (!enc) return;
+    // 每 hop 一帧 Opus（10 ms）。服务端按 hop 重切，不依赖帧长。
+    const f = new Float32Array(e.data);
+    enc.encode(new AudioData({
+      format: 'f32-planar', sampleRate: SR, numberOfFrames: f.length,
+      numberOfChannels: 1, timestamp: 0, data: f }));
+  };
+  const src = actx.createMediaStreamSource(stream);
+  src.connect(micNode);
+  enc = new AudioEncoder({
+    output: (c) => { const b = new Uint8Array(c.byteLength); c.copyTo(b); sendBin(b.buffer); },
+    error: (err) => say('Opus 编码失败：' + err.message, 'err') });
+  enc.configure({ codec: 'opus', sampleRate: SR, numberOfChannels: 1, bitrate: 32000 });
+}
+
+// ---- 扬声器下行：WebCodecs Opus → AudioWorklet 排队播放 ----
+let spkNode = null;
+async function startSpk() {
+  if (!actx) actx = new AudioContext({ sampleRate: SR });
+  if (actx.state === 'suspended') await actx.resume();
+  await actx.audioWorklet.addModule(worklet());
+  // 输出侧用零输入的 worklet 不行（会一直 produce），改用脚本节点式回环：
+  // 直接把解码后的 Float32 挂到 destination，按 ctx.currentTime 排。
+  spkGain = actx.createGain(); spkGain.gain.value = 1; spkGain.connect(actx.destination);
+  dec = new AudioDecoder({
+    output: (a) => {
+      const n = a.numberOfFrames;
+      const buf = new Float32Array(n);
+      a.copyTo(buf, { planeIndex: 0 });
+      const at = Math.max(playAt, actx.currentTime + 0.02);
+      playAt = at + n / SR;
+      const src2 = actx.createBufferSource();
+      const ab = actx.createBuffer(1, n, SR);
+      ab.copyToChannel(buf, 0);
+      src2.buffer = ab; src2.connect(spkGain); src2.start(at);
+    },
+    error: (err) => say('Opus 解码失败：' + err.message, 'err') });
+  dec.configure({ codec: 'opus', sampleRate: SR, numberOfChannels: 1 });
+  // 订阅电脑音频：proto.rs 里 `Sub` 是**无负载**的单位变体，只能发 {"t":"sub"}，
+  // 带任何额外字段服务端都解析不出来。
+  send({ t: 'sub' });
+}
+
+// ---- UI ----
+function bind(id, fn) {
+  const b = document.getElementById(id);
+  b.addEventListener('click', async () => { b.disabled = true; try { await fn(b); } catch (e) { say(String(e), 'err'); } finally { b.disabled = false; } });
+}
+bind('bMic', async (b) => {
+  micOn = !micOn; b.setAttribute('aria-pressed', String(micOn));
+  if (micOn) { await startMic(); say('麦克风已开', 'on'); }
+  else if (micNode) { micNode.disconnect(); micNode = null; say('麦克风已关'); }
+});
+bind('bSpk', async (b) => {
+  spkOn = !spkOn; b.setAttribute('aria-pressed', String(spkOn));
+  if (spkOn) { await startSpk(); }
+  else { dec && dec.close(); dec = null; say('扬声器已关'); }
+});
+// 远程输入**没有客户端消息**：它是电脑端的总开关（proto.rs 里没有 remote_input），
+// 客户端发过去服务端解析不出来、连接会被断开。只能提示用户在电脑上勾。
+bind('bKb', () => {
+  document.getElementById('kb').classList.toggle('on');
+  hint.textContent = '打字与按键要电脑端也勾上「远程输入」才生效（默认关闭，同网段无鉴权）。';
+});
+bind('bClose', () => document.getElementById('kb').classList.remove('on'));
+
+const text = document.getElementById('text');
+function pushText() {
+  const s = text.value;
+  if (s) { send({ t: 'text', s }); text.value = ''; }
+}
+text.addEventListener('change', pushText);
+text.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); pushText(); } });
+
+// ---- 虚拟键盘：Android 键码常量（与 net/keymap.rs 对齐的子集） ----
+const K = {
+  '1':{w:'w2',c:'1',a:7},'2':{w:'w2',c:'2',a:8},'3':{w:'w2',c:'3',a:9},'4':{w:'w2',c:'4',a:10},
+  '5':{w:'w2',c:'5',a:11},'6':{w:'w2',c:'6',a:12},'7':{w:'w2',c:'7',a:13},'8':{w:'w2',c:'8',a:14},
+  '9':{w:'w2',c:'9',a:15},'0':{w:'w2',c:'0',a:7},
+};
+// 布局：[标签, Android keycode, 宽度倍数]
+const LAYOUT = [
+  [['Esc',111],['1',8],['2',9],['3',10],['4',11],['5',12],['6',13],['7',14],['8',15],['9',16],['0',7],['⌫',67]],
+  [['Tab',61],['Q',24],['W',25],['E',26],['R',27],['T',28],['Y',29],['U',30],['I',31],['O',32],['P',33],['[',71],[']',72]],
+  [['Caps',113],['A',29],['S',30],['D',31],['F',32],['G',33],['H',34],['J',35],['K',36],['L',37],[';',74],["'",75],['↵',66]],
+  [['Shift',59],['Z',54],['X',55],['C',56],['V',57],['B',58],['N',59],['M',60],[',',55],['.',56],['/',57],['Shift',59]],
+  [['Ctrl',113],['Alt',57],['',0],['空格',62],['←',21],['↑',19],['↓',20],['→',22]],
+];
+const WD = { 'Tab':'w2','Caps':'w2','↵':'w2','Shift':'w2','空格':'w3','Ctrl':'w3','Alt':'w3' };
+LAYOUT.forEach((row, ri) => {
+  const host = document.getElementById('r' + ri);
+  row.forEach(([label, code]) => {
+    const d = document.createElement('div');
+    d.className = 'k ' + (WD[label] || '');
+    d.textContent = label;
+    if (code) {
+      d.addEventListener('pointerdown', (e) => {
+        e.preventDefault(); d.classList.add('act');
+        send({ t: 'key', code, down: true });
+      });
+      const up = () => { d.classList.remove('act'); send({ t: 'key', code, down: false }); };
+      d.addEventListener('pointerup', up);
+      d.addEventListener('pointerleave', up);
+      d.addEventListener('pointercancel', up);
+    } else { d.style.visibility = 'hidden'; }
+    host.appendChild(d);
+  });
+});
+
+// 没有 WebCodecs 就明说，别让按钮点了没反应（无痕/旧 WebView 常见）
+if (typeof AudioEncoder === 'undefined' || typeof AudioDecoder === 'undefined') {
+  say('此浏览器不支持 WebCodecs（Opus），麦克风/扬声器不可用；打字与键盘仍可用', 'err');
+  document.getElementById('bMic').disabled = true;
+  document.getElementById('bSpk').disabled = true;
+} else {
+  connect();
+}
+</script>
+</html>
+"##;

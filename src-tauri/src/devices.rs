@@ -18,7 +18,6 @@
 //! 音频设备枚举（cpal）。刷新单一入口：[`spawn_refresh`]，后台线程执行，
 //! 结果写入 DebugHub；UI 线程禁止同步枚举。
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use cpal::traits::{DeviceTrait, HostTrait};
@@ -81,15 +80,65 @@ pub struct LoopbackTarget {
   pub name: String,
 }
 
+/// 枚举结果的对外状态（进快照，供界面显示「正在刷新 / 上次刷新耗时 / 上次失败原因」）。
+///
+/// **必须有它**：刷新设备是用户主动点的动作，静默失败（或被静默跳过）会让人以为程序
+/// 卡住了。以前 `REFRESHING` 一旦被 panic 卡住就再也刷不了，而界面上什么提示都没有。
+#[derive(Clone, Debug, Serialize)]
+pub struct RefreshState {
+  /// 此刻是否有枚举在跑
+  pub refreshing: bool,
+  /// 最近一次枚举的 Unix 毫秒（0 = 从未成功）
+  pub last_ok_ms: u64,
+  /// 最近一次枚举耗时（毫秒）
+  pub last_ms: u64,
+  /// 最近一次失败原因（Rust 诊断文本；成功时为空）
+  pub last_error: String,
+}
+
+static REFRESH: std::sync::Mutex<RefreshState> = std::sync::Mutex::new(RefreshState {
+  refreshing: false,
+  last_ok_ms: 0,
+  last_ms: 0,
+  last_error: String::new(),
+});
+
+/// 枚举进程内**串行且带缓存**。
+///
+/// 为什么要缓存：① 枚举会打到 WASAPI / ALSA，跟正在跑的会话并发枚举互相拖慢，界面点
+/// 刷新时就「感觉卡住」；② `loopback_targets()`（界面初始化时调）原先自己又跑一遍
+/// **完整枚举**，等于同一时刻两条枚举在抢驱动。
+static ENUM_CACHE: std::sync::Mutex<Option<DeviceList>> = std::sync::Mutex::new(None);
+
+/// 缓存的新鲜期：这段时间内直接复用，不重新枚举。
+const CACHE_TTL_MS: u64 = 1_000;
+
+/// 当前刷新状态（界面与快照同源）。
+pub fn refresh_state() -> RefreshState {
+  REFRESH.lock().unwrap().clone()
+}
+
+/// 拿一份设备列表：优先用新鲜缓存，否则**同步**枚举一次并回填。
+/// 供 `loopback_targets()` 这类「只要列表、不发起异步刷新」的调用方使用。
+fn cached_enumerate() -> DeviceList {
+  if let Ok(g) = ENUM_CACHE.lock()
+    && let Some(list) = g.as_ref()
+    && now_ms().saturating_sub(list.enumerated_at) <= CACHE_TTL_MS
+  {
+    return list.clone();
+  }
+  let list = enumerate();
+  *ENUM_CACHE.lock().unwrap() = Some(list.clone());
+  list
+}
+
 /// 列出可回环的输出（不含「系统默认输出」那条，默认项由界面加并翻译）。
 ///   - Linux：PipeWire/Pulse 的 sinks（`pactl list sinks` 的 Name/Description）；
 ///   - Windows：cpal 的输出设备（`loopback:<wasapi 端点 ID>`）；
 ///   - 其它平台：空（AEC 回环不可用）。
 pub fn loopback_targets() -> Vec<LoopbackTarget> {
-  plat::loopback_targets()
+  plat::loopback_targets(&cached_enumerate())
 }
-
-static REFRESHING: AtomicBool = AtomicBool::new(false);
 
 /// 按设备 ID 查找设备（输入/输出共用的唯一查找入口），返回设备与显示名。
 pub fn find(device_id: &str, input: bool) -> Result<(cpal::Device, String), String> {
@@ -125,18 +174,62 @@ pub fn default_output_id() -> Option<String> {
   dev.id().ok().map(|i| i.to_string())
 }
 
-/// 后台刷新设备列表；已有刷新在进行时直接返回。
-pub fn spawn_refresh(hub: SharedHub) {
-  if REFRESHING.swap(true, Ordering::SeqCst) {
-    return;
+/// 枚举繁忙守卫：**析构时必定解锁**。
+///
+/// 以前解锁写在正常路径末尾——枚举线程一旦 panic（或线程起不来时 `.expect` 直接崩），
+/// 标志就永久卡住，**此后所有刷新都被静默跳过**，只能重启程序。放进 `Drop` 才保证
+/// 「异常也解锁」。
+struct BusyGuard;
+
+impl Drop for BusyGuard {
+  fn drop(&mut self) {
+    REFRESH.lock().unwrap().refreshing = false;
   }
-  std::thread::Builder::new()
+}
+
+/// 后台刷新设备列表。返回一句给界面**直接显示**的话——不做静默跳过：
+/// 正在刷就如实说正在刷，线程起不来就把错误返回。
+pub fn spawn_refresh(hub: SharedHub) -> String {
+  {
+    let mut g = REFRESH.lock().unwrap();
+    if g.refreshing {
+      return "正在刷新设备，请稍候".to_string();
+    }
+    g.refreshing = true;
+    g.last_error.clear();
+  }
+  let _busy = BusyGuard;
+  let hub2 = hub.clone();
+  let r = std::thread::Builder::new()
     .name("device-enum".into())
     .spawn(move || {
-      hub.set_devices(Probe::ok(enumerate()));
-      REFRESHING.store(false, Ordering::SeqCst);
-    })
-    .expect("spawn device-enum");
+      let t0 = Instant::now();
+      // catch_unwind：枚举要碰到用户机器的驱动状态，任何 panic 都不该带走整个程序，
+      // 更不该把刷新锁死——记原因、报不可用，界面照常显示。
+      match std::panic::catch_unwind(std::panic::AssertUnwindSafe(enumerate)) {
+        Ok(list) => {
+          let ms = t0.elapsed().as_millis() as u64;
+          hub2.set_devices(Probe::ok(list.clone()));
+          *ENUM_CACHE.lock().unwrap() = Some(list);
+          REFRESH.lock().unwrap().last_ms = ms;
+        }
+        Err(_) => {
+          hub2.set_devices(Probe::unavailable(
+            "枚举设备时发生内部错误，已跳过本次刷新".to_string(),
+          ));
+          REFRESH.lock().unwrap().last_error = "枚举设备时发生内部错误".to_string();
+        }
+      }
+    });
+  match r {
+    Ok(_) => "正在枚举设备…".to_string(),
+    Err(e) => {
+      let msg = format!("刷新设备失败：起不来枚举线程（{e}）");
+      REFRESH.lock().unwrap().last_error = msg.clone();
+      hub.set_devices(Probe::unavailable(msg.clone()));
+      msg
+    }
+  }
 }
 
 fn native_of(r: Result<cpal::SupportedStreamConfig, cpal::Error>) -> Probe<NativeFormat> {
@@ -241,4 +334,50 @@ fn simplify(devices: Vec<DeviceInfo>) -> Vec<DeviceInfo> {
 /// 只认 `loopback` / `loopback:<sink>`，填 ALSA 设备 ID 会拼出无效的 `<id>.monitor`。
 pub fn loopback_accepts_device_id() -> bool {
   plat::LOOPBACK_ACCEPTS_DEVICE_ID
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  /// 刷新**不会被永久卡住**：`BusyGuard` 析构必解锁。
+  ///
+  /// 这正是原来的 bug：`REFRESHING` 只在正常路径末尾清零，枚举线程一旦 panic（或线程
+  /// 起不来时 `.expect` 直接崩），标志永久停在 true，之后所有刷新被静默跳过，只能重启。
+  #[test]
+  fn busy_guard_always_unlocks_even_on_panic() {
+    REFRESH.lock().unwrap().refreshing = false;
+    let r = std::panic::catch_unwind(|| {
+      REFRESH.lock().unwrap().refreshing = true;
+      let _g = BusyGuard;
+      panic!("模拟枚举线程 panic");
+    });
+    assert!(r.is_err(), "先确认确实 panic 了");
+    assert!(
+      !refresh_state().refreshing,
+      "守卫析构后必须解锁，否则刷新被永久静默跳过"
+    );
+  }
+
+  #[test]
+  fn refresh_state_roundtrip_and_serializes() {
+    REFRESH.lock().unwrap().refreshing = false;
+    REFRESH.lock().unwrap().last_error = "".into();
+    let j = serde_json::to_string(&refresh_state()).unwrap();
+    for k in ["refreshing", "last_ok_ms", "last_ms", "last_error"] {
+      assert!(j.contains(k), "刷新状态字段 {k} 必须进快照：{j}");
+    }
+  }
+
+  /// 连续两次刷新都要有明确回应（第二次可以是「正在刷新」，但**不能无声无息**）。
+  #[test]
+  fn spawn_refresh_always_returns_a_message() {
+    let hub = crate::debug::DebugHub::new();
+    REFRESH.lock().unwrap().refreshing = false;
+    let first = spawn_refresh(hub.clone());
+    assert!(!first.is_empty(), "刷新必须回一句话给界面");
+    // 第二次：要么也开始刷（回「正在枚举」），要么如实说「正在刷新」
+    let second = spawn_refresh(hub);
+    assert!(!second.is_empty(), "并发刷新也必须回话，不能静默跳过");
+  }
 }

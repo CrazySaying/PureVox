@@ -91,10 +91,28 @@ static SPECS: &[NodeSpec] = &[
   },
   NodeSpec {
     ptype: "remote_mic",
-    label: "手机麦克风",
+    label: "网络麦克风",
     kind: NodeKind::Input,
     // 无参数：不需要虚拟声卡驱动，网络流直接进引擎；全会话只允许一个
     params: &[],
+  },
+  NodeSpec {
+    ptype: "loopback",
+    label: "电脑播放音频",
+    kind: NodeKind::Input,
+    // 无采集设备意义上的「输入」：捕获输出设备正在播放的系统混音（WASAPI loopback /
+    // PipeWire monitor）。`device` = `loopback`（系统默认输出）或 `loopback:<端点ID｜sink>`
+    //（按平台，同 AEC 远端取值规则）；行内增益（系统混音偏响，默认压低 6 dB）。
+    params: &[ParamSpec {
+      key: "volume_db",
+      label: "音量(dB)",
+      kind: ParamKind::Number {
+        lo: -30.0,
+        hi: 6.0,
+        default: -6.0,
+        step: 1.0,
+      },
+    }],
   },
   NodeSpec {
     ptype: "echo_cancel",
@@ -202,6 +220,52 @@ static SPECS: &[NodeSpec] = &[
       },
     ],
   },
+  NodeSpec {
+    ptype: "soundpad",
+    label: "音效板",
+    kind: NodeKind::Process,
+    // 音效列表（JSON：[{name, path, volume_db}]）由界面「添加音效」维护（入库后引用
+    // 库内 WAV）；播放/音量是运行时命令（MediaHub），不进参数控件。
+    params: &[ParamSpec {
+      key: "pads",
+      label: "音效",
+      kind: ParamKind::Text { default: "" },
+    }],
+  },
+  NodeSpec {
+    ptype: "player",
+    label: "音乐播放器",
+    kind: NodeKind::Process,
+    // 曲目 = 库内 WAV 路径（`~/.purevox/music/`，导入时归一）；流式环流播放。
+    params: &[
+      ParamSpec {
+        key: "path",
+        label: "曲目",
+        kind: ParamKind::Text { default: "" },
+      },
+      ParamSpec {
+        key: "volume_db",
+        label: "音量(dB)",
+        kind: ParamKind::Number {
+          lo: -10.0,
+          hi: 10.0,
+          default: 0.0,
+          step: 1.0,
+        },
+      },
+      // 断点续播（秒）：暂停/拖动/退出即写，重启后从该位置续播
+      ParamSpec {
+        key: "resume_sec",
+        label: "续播位置",
+        kind: ParamKind::Number {
+          lo: 0.0,
+          hi: 100000.0,
+          default: 0.0,
+          step: 1.0,
+        },
+      },
+    ],
+  },
   // 输出行（汇）
   NodeSpec {
     ptype: "audio_output",
@@ -211,7 +275,7 @@ static SPECS: &[NodeSpec] = &[
   },
   NodeSpec {
     ptype: "remote_speaker",
-    label: "手机扬声器",
+    label: "网络扬声器",
     kind: NodeKind::Output,
     params: &[],
   },
@@ -255,7 +319,12 @@ pub fn get_spec(ptype: &str) -> Option<&'static NodeSpec> {
 }
 
 /// 实例化处理类组件（输入/输出/可视化不是 Stage，由 L0 实现）。
-pub fn create_stage(ptype: &str, params: &Params) -> Result<Box<dyn Stage>, String> {
+/// `media`：音效板 / 播放器的媒体槽位（运行时命令通道，见 `engine::media`）。
+pub fn create_stage(
+  ptype: &str,
+  params: &Params,
+  media: Option<std::sync::Arc<super::media::MediaSlot>>,
+) -> Result<Box<dyn Stage>, String> {
   let spec = get_spec(ptype).ok_or_else(|| format!("未知节点类型 {ptype}"))?;
   match spec.ptype {
     "denoise" => {
@@ -288,6 +357,33 @@ pub fn create_stage(ptype: &str, params: &Params) -> Result<Box<dyn Stage>, Stri
         _ => 0.0,
       };
       Ok(Box::new(super::components::gain::GainStage::load(db)))
+    }
+    "soundpad" => {
+      let slot = media.ok_or_else(|| "音效板缺少媒体槽位（内部错误）".to_string())?;
+      let pads = match params.get("pads") {
+        Some(ParamValue::Text(t)) => t.clone(),
+        _ => String::new(),
+      };
+      Ok(Box::new(super::components::soundpad::SoundpadStage::load(
+        &pads, slot,
+      )?))
+    }
+    "player" => {
+      let slot = media.ok_or_else(|| "播放器缺少媒体槽位（内部错误）".to_string())?;
+      let text = |k: &str| match params.get(k) {
+        Some(ParamValue::Text(t)) => t.clone(),
+        _ => String::new(),
+      };
+      let num = |k: &str, d: f64| match params.get(k) {
+        Some(ParamValue::Text(t)) => t.trim().parse().unwrap_or(d),
+        _ => d,
+      };
+      Ok(Box::new(super::components::player::PlayerStage::load(
+        &text("path"),
+        num("volume_db", 0.0),
+        num("resume_sec", 0.0),
+        slot,
+      )))
     }
     other => Err(format!("节点类型 {other} 不是处理组件")),
   }

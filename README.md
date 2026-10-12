@@ -15,6 +15,9 @@ PureVox 正在从 Python + Tkinter 迁移到 **Tauri 3**，主线从零重建，
 
 ## 许可证
 
-- 源码：GPL-3.0-or-later，见 [LICENSE](LICENSE)。
+- 源码：GPL-3.0-or-later。`LICENSE` 是 FSF 发布的 **GPL-3.0 原文（未改动）**；
+  本项目的版权声明只出现在各源文件头部与本节，`LICENSE` 里不加任何项目专属内容。
+- Copyright (C) 2024-2026 a2heng <752848283@qq.com>
+- 第三方库逐个声明见 [LICENSE-THIRD-PARTY.txt](LICENSE-THIRD-PARTY.txt)。
 - 内置 AI 模型（`models/*.onnx`）不随 GPL 授权，见 [MODEL-LICENSE.md](MODEL-LICENSE.md)。
 - 作者另有 MIT 授权的模型仓库可自由使用：`lightweight-denoise-48k` / `lightweight-aec-48k`。

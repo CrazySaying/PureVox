@@ -34,6 +34,7 @@ mod dsp;
 mod engine;
 mod hotkey;
 mod infer;
+mod media;
 mod net;
 #[cfg(windows)]
 #[path = "openurl_windows.rs"]
@@ -46,6 +47,7 @@ mod openurl;
 mod openurl;
 mod plan;
 mod recorder;
+mod update;
 mod version;
 mod wav;
 
@@ -65,10 +67,19 @@ fn debug_snapshot(hub: tauri::State<'_, SharedHub>) -> DebugSnapshot {
   hub.snapshot()
 }
 
-/// 刷新设备列表（后台执行，立即返回）。
+/// 刷新设备列表（后台执行，立即返回一句状态给界面显示）。
+///
+/// **不静默跳过**：正在刷就如实说正在刷，失败就带原因——以前这里是个静默的
+/// 「已有刷新在进行时直接 return」，界面上按钮点了跟没点一样，只会觉得被卡住。
 #[tauri::command]
-fn refresh_devices(hub: tauri::State<'_, SharedHub>) {
-  devices::spawn_refresh(hub.inner().clone());
+fn refresh_devices(hub: tauri::State<'_, SharedHub>) -> String {
+  devices::spawn_refresh(hub.inner().clone())
+}
+
+/// 设备刷新状态（正在刷 / 上次成功于 / 上次耗时 / 上次失败原因）。
+#[tauri::command]
+fn device_refresh_state() -> devices::RefreshState {
+  devices::refresh_state()
 }
 
 /// 界面自报错误/状态，追加进调试快照（`/debug` 的 `ui` 数组），便于无控制台时定位前端问题。
@@ -101,15 +112,90 @@ fn get_plan(mgr: tauri::State<'_, Arc<AudioManager>>) -> Plan {
 }
 
 /// 应用新计划（结构性变更 → 重建会话）。返回逐行问题（非致命）。
+///
+/// 顺便**重注册音效热键**：热键跟着计划走（`plan::pad_hotkeys`），增删音效后
+/// 必须重新收口，否则界面看着有键、按下去没反应。
 #[tauri::command]
 async fn apply_plan(
   plan: Plan,
   mgr: tauri::State<'_, Arc<AudioManager>>,
+  app: tauri::AppHandle,
 ) -> Result<Vec<String>, String> {
   let mgr = mgr.inner().clone();
-  tauri::async_runtime::spawn_blocking(move || mgr.apply_plan(plan))
+  let problems = tauri::async_runtime::spawn_blocking(move || mgr.apply_plan(plan))
     .await
-    .map_err(|e| format!("应用计划异常：{e}"))?
+    .map_err(|e| format!("应用计划异常：{e}"))??;
+  start_hotkey(&app, &app.state::<HotkeyHost>());
+  Ok(problems)
+}
+
+/// 热参数落盘（不重建会话）：音量 / 续播位置等改动用它 + 对应的媒体运行时命令
+/// （DESIGN.md §5：热参数下发给运行中的实例，不重启）。
+#[tauri::command]
+fn persist_plan(plan: Plan, mgr: tauri::State<'_, Arc<AudioManager>>) -> Result<(), String> {
+  mgr.persist_plan(plan)
+}
+
+#[derive(serde::Serialize)]
+struct ImportedInfo {
+  path: String,
+  name: String,
+  reused: bool,
+}
+
+/// 媒体库导入（音效板 / 播放器）：界面文件选择读出字节 → base64 → 解码归一 → 落库。
+/// `kind`：`soundpad` / `music`。
+///
+/// 走 base64 文本而非字节数组：`<input type=file>` 给的是 `Uint8Array`，逐字节过
+/// JSON 会让一个 10 MB 的曲子变成几千万个数字，编码成一个字符串小一个量级。
+#[tauri::command]
+fn media_import(data_b64: String, name: String, kind: String) -> Result<ImportedInfo, String> {
+  use base64::Engine;
+  let kind = match kind.as_str() {
+    "soundpad" => media::MediaKind::Soundpad,
+    "music" => media::MediaKind::Music,
+    other => return Err(format!("未知媒体类型 {other}")),
+  };
+  let bytes = base64::engine::general_purpose::STANDARD
+    .decode(data_b64.as_bytes())
+    .map_err(|e| format!("文件内容解码失败：{e}"))?;
+  let im = media::import(&bytes, &name, kind)?;
+  Ok(ImportedInfo {
+    path: im.path.to_string_lossy().into_owned(),
+    name: im.name,
+    reused: im.reused,
+  })
+}
+
+/// 移除库内媒体文件。双重护栏：只删媒体库内路径；仍被计划引用（任一行的参数里
+/// 出现过该路径）则拒绝——同一文件可被多个音效引用。
+#[tauri::command]
+fn media_discard(path: String, mgr: tauri::State<'_, Arc<AudioManager>>) -> Result<(), String> {
+  let plan = mgr.plan();
+  let referenced = plan
+    .columns
+    .iter()
+    .flat_map(|c| c.rows.iter())
+    .any(|r| r.params.values().any(|v| v.contains(&path)));
+  if referenced {
+    return Err("该文件仍被计划引用，不能删除".into());
+  }
+  media::discard(&path)
+}
+
+/// 媒体行运行时命令（音效板 / 播放器）。(col, row) 寻址；会话未运行时静默忽略
+/// （槽位不存在）。
+#[tauri::command]
+fn media_command(col: usize, row: usize, cmd: engine::media::MediaCmd) {
+  if let Some(slot) = engine::media::hub().slot(col, row) {
+    slot.send(cmd);
+  }
+}
+
+/// 媒体行状态快照（界面 2 Hz 轮询）；未运行 / 非媒体行返回 null。
+#[tauri::command]
+fn media_status(col: usize, row: usize) -> Option<engine::media::MediaStatus> {
+  engine::media::hub().slot(col, row).map(|s| s.status())
 }
 
 #[derive(serde::Serialize)]
@@ -201,10 +287,35 @@ fn record_tse_reference(
   mgr.record_reference(seconds)
 }
 
-/// 测 AEC 延时：采集 3 s（最大搜索 500 ms），结果见 `/debug` 的 `calib` 字段。
+/// 测 AEC 延时：采集 1.6 s（最大搜索 1000 ms），结果见 `/debug` 的 `calib` 字段。
+///
+/// **不必先手动启动**：会话未运行时自动临时启动一个，测完（含失败 / 超时）由看门狗线程
+/// 停回原状；期间用户自己启停过就不动他的会话（`AudioManager::finish_temp_session`）。
 #[tauri::command]
 fn calibrate_aec_delay(mgr: tauri::State<'_, Arc<AudioManager>>) -> Result<String, String> {
-  mgr.calibrate_aec_delay()
+  let mgr = mgr.inner().clone();
+  let (msg, temp_epoch) = mgr.calibrate_aec_delay()?;
+  if temp_epoch.is_some() {
+    spawn_calib_watchdog(mgr, temp_epoch);
+  }
+  Ok(msg)
+}
+
+/// 校准看门狗：轮询到校准不在进行中就收尾；硬超时兜底，保证临时会话一定被停掉。
+/// 间隔 100 ms、上限 30 s（`calib` 内部 deadline 是采集时长 ×3，这里留足余量）。
+fn spawn_calib_watchdog(mgr: Arc<AudioManager>, temp_epoch: Option<u64>) {
+  std::thread::Builder::new()
+    .name("calib-watchdog".into())
+    .spawn(move || {
+      const TICK: std::time::Duration = std::time::Duration::from_millis(100);
+      const LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+      let t0 = std::time::Instant::now();
+      while t0.elapsed() < LIMIT && mgr.calib_in_flight() {
+        std::thread::sleep(TICK);
+      }
+      mgr.finish_temp_session(temp_epoch);
+    })
+    .ok();
 }
 
 /// 启动网络服务（手机 ⇄ 电脑，端口 59123）。幂等。
@@ -220,10 +331,22 @@ fn net_stop() -> Result<String, String> {
   Ok("已停止".into())
 }
 
+/// 重启网络服务：先真的停（abort 监听）再起。改端口后、连不上、或服务假死都靠它。
+#[tauri::command]
+fn net_restart() -> Result<String, String> {
+  net::restart()
+}
+
 /// 网络状态（界面展示；明细见 `/debug` 的 `net` 字段）。
 #[tauri::command]
 fn net_status() -> String {
   net::status()
+}
+
+/// 服务是否在跑（界面按钮用布尔，别去 `net_status` 的中文串里匹配）。
+#[tauri::command]
+fn net_running() -> bool {
+  net::hub().is_running()
 }
 
 /// 远程输入总开关：手机输入法打字 + 手机实体键当全尺寸键盘。**默认关**。
@@ -237,7 +360,47 @@ fn net_set_remote_input(on: bool) -> Result<String, String> {
   })
 }
 
-/// Linux 虚拟麦克风（PipeWire）当前状态；非 Linux / 不可用时带原因。
+/// 网络行卡片展示用：本机在局域网的 IP 与**网页版客户端地址**（`http://<ip>:59123/`）。
+/// 取 IP 用 UDP 小技巧（连一个公网地址的本地面，不发包也不需连网）；失败时
+/// `ip` 为空、`reason` 说明原因（界面显示「不可用 + 原因」，不显示伪造的 0）。
+/// 注意给的是 `http://` 不是 `ws://`：二维码要能扫出**能打开的网页**。
+#[derive(serde::Serialize)]
+struct NetLocalAddr {
+  ip: String,
+  port: u16,
+  url: String,
+  reason: String,
+}
+
+#[tauri::command]
+fn net_local_addr() -> NetLocalAddr {
+  let port = net::proto::PORT;
+  let fail = |reason: String| NetLocalAddr {
+    ip: String::new(),
+    port,
+    url: String::new(),
+    reason,
+  };
+  let sock = match std::net::UdpSocket::bind("0.0.0.0:0") {
+    Ok(s) => s,
+    Err(e) => return fail(format!("取本机地址失败：{e}")),
+  };
+  if sock.connect("8.8.8.8:80").is_err() {
+    return fail("取本机地址失败：无法确定默认路由出口".into());
+  }
+  match sock.local_addr() {
+    Ok(a) => NetLocalAddr {
+      ip: a.ip().to_string(),
+      port,
+      // 给人看的地址是 **http://**，不是 ws:// —— `ws://` 只在扫码后的网页版
+      // 客户端内部用（它自己拼 `/ws`）。二维码指向 ws:// 的话手机会当普通文本，
+      // 扫码后什么也不会发生。
+      url: format!("http://{}:{}/", a.ip(), port),
+      reason: String::new(),
+    },
+    Err(e) => fail(format!("取本机地址失败：{e}")),
+  }
+}
 #[tauri::command]
 fn virtual_mic_status() -> debug::Probe<audio::virtual_mic::Status> {
   audio::virtual_mic::status_probe()
@@ -275,6 +438,47 @@ fn get_platform() -> String {
   std::env::consts::OS.to_string()
 }
 
+// ── 更新（GitHub Releases，见 `update` 模块）──
+
+/// 更新状态（界面轮询；与 `/debug` 的 `update` 段同源）。
+#[tauri::command]
+fn update_status() -> update::Status {
+  update::status()
+}
+
+/// 检查更新（拉 GitHub Releases 的 `latest`）。网络 I/O 放后台，不卡界面。
+#[tauri::command]
+async fn update_check() -> Result<update::Status, String> {
+  update::check().await
+}
+
+/// 下载已匹配到的本平台安装包（带进度，见 `update_status`）。
+#[tauri::command]
+async fn update_download() -> Result<update::Status, String> {
+  update::download().await
+}
+
+/// 安装已下载的产物。Windows = NSIS 静默（拉起安装器后本进程退出），
+/// Linux AppImage = 覆盖自身（需用户重启）。返回一句给界面显示的话。
+#[tauri::command]
+fn update_install(app: tauri::AppHandle) -> Result<String, String> {
+  let msg = update::install()?;
+  // 装完由安装器（/R）或用户重启；引擎先停，避免占着音频设备不退。
+  app.state::<Arc<AudioManager>>().stop();
+  // 给安装器一点时间看到进程已退出（安装器侧也有 CheckIfAppIsRunning 兜底）。
+  std::thread::spawn(move || {
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+    app.exit(0);
+  });
+  Ok(msg)
+}
+
+/// 打开 release 页面（手动下载的出口；不自动更新时界面引导到这）。
+#[tauri::command]
+fn update_open_page(url: String) -> Result<(), String> {
+  openurl::open(&url)
+}
+
 /// 用系统默认浏览器打开链接（驱动下载 / 教程）。
 #[tauri::command]
 fn open_url(url: String) -> Result<(), String> {
@@ -290,11 +494,7 @@ fn main() {
   debug::http::spawn(hub.clone());
   devices::spawn_refresh(hub.clone());
   let audio = Arc::new(AudioManager::new(hub.clone()));
-  let hotkey_host = HotkeyHost(Mutex::new(hotkey::Hotkeys::start(
-    "",
-    hub.clone(),
-    Arc::new(|| {}),
-  )));
+  let hotkey_host = HotkeyHost(Mutex::new(hotkey::Hotkeys::start(Vec::new(), hub.clone())));
 
   tauri::Builder::default()
     .runtime(tauri_runtime_wry::Wry::default())
@@ -342,7 +542,8 @@ fn main() {
           }
           std::thread::sleep(std::time::Duration::from_millis(ms));
           match mgr.calibrate_aec_delay() {
-            Ok(t) => hub.push_ui("info", format!("AUTOCALIB：{t}")),
+            // 这个钩子是自己先 start() 的，所以返回 None（不是临时会话，别停）
+            Ok((t, _)) => hub.push_ui("info", format!("AUTOCALIB：{t}")),
             Err(e) => hub.push_ui("error", format!("AUTOCALIB：{e}")),
           }
         });
@@ -363,6 +564,7 @@ fn main() {
     .invoke_handler(tauri::generate_handler![
       debug_snapshot,
       refresh_devices,
+      device_refresh_state,
       ui_report,
       open_devtools,
       set_autostart,
@@ -375,19 +577,32 @@ fn main() {
       list_cues,
       get_plan,
       apply_plan,
+      persist_plan,
+      media_import,
+      media_discard,
+      media_command,
+      media_status,
       list_models,
       list_nodes,
       record_tse_reference,
       calibrate_aec_delay,
       net_start,
       net_stop,
+      net_restart,
       net_status,
+      net_running,
       net_set_remote_input,
+      net_local_addr,
       virtual_mic_status,
       virtual_mic_create,
       virtual_mic_remove,
       list_loopback_targets,
       get_platform,
+      update_status,
+      update_check,
+      update_download,
+      update_install,
+      update_open_page,
       open_url
     ])
     .run(tauri::generate_context!())
@@ -494,19 +709,29 @@ fn apply_running(app: &tauri::AppHandle, mgr: &AudioManager, on: bool) {
   sync_tray(app, on);
 }
 
-/// 按当前设置（重）启动全局热键。
+/// 按当前设置 + 当前计划（音效热键）重启全局热键。
+///
+/// 绑定来源两处：① 设置里的启停热键；② 每个 `soundpad` 处理行里逐个音效录的键
+/// （跟着计划走，增删音效即重注册）。计划是结构性变更（`apply_plan`）、
+/// 设置是保存动作——两处都调这里，不搞两套注册逻辑。
 fn start_hotkey(app: &tauri::AppHandle, host: &HotkeyHost) {
   let s = config::load_settings();
-  let spec = if s.hotkey_on {
-    s.hotkey.clone()
-  } else {
-    String::new()
-  };
   let hub = app.state::<SharedHub>().inner().clone();
   let app2 = app.clone();
   let mgr = app.state::<Arc<AudioManager>>().inner().clone();
-  let cb: Arc<dyn Fn() + Send + Sync> = Arc::new(move || toggle_running(&app2, &mgr));
-  let hk = hotkey::Hotkeys::start(&spec, hub, cb);
+  let mut bindings: Vec<hotkey::Binding> = Vec::new();
+
+  if s.hotkey_on && !s.hotkey.trim().is_empty() {
+    let a = app2.clone();
+    let m = mgr.clone();
+    bindings.push((
+      s.hotkey.clone(),
+      Arc::new(move || toggle_running(&a, &m)) as Arc<dyn Fn() + Send + Sync>,
+    ));
+  }
+  bindings.extend(plan::pad_hotkeys(&mgr.plan(), hub.clone()));
+
+  let hk = hotkey::Hotkeys::start(bindings, hub);
   let mut guard = host.0.lock().unwrap();
   guard.stop();
   *guard = hk;

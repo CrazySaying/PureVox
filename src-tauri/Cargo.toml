@@ -45,8 +45,35 @@ rtrb = "0.4"
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+# 更新检查：查 GitHub Releases + 下载安装包（reqwest 已随 tauri 进入依赖树，
+# 这里直接复用；TLS 后端与 ort 的 ureq 同一套 native-tls，不新增 C 编译链）
+reqwest = { version = "0.13", default-features = false, features = [
+  "json",
+  "stream",
+  "default-tls",
+] }
 # 调试频谱
 rustfft = "6"
+# 媒体库导入：解码任意常见音频 → 归一为 48k 单声道 WAV（纯 Rust，不引入 C 编译链；
+# 与 Opus 运行时加载同一纪律）。
+# 注意 symphonia 的 feature 分两类：**容器**（format）与**解码器**（codec），缺一不可：
+#   `wav` = 容器（只开 `pcm` 只有 PCM 解码器、没有 RIFF 读取器，wav 直接打不开），
+#   `ogg` = vorbis 的容器，`isomp4` = m4a / AAC-in-MP4 的容器。
+symphonia = { version = "0.5", default-features = false, features = [
+  # 容器
+  "wav",
+  "ogg",
+  "isomp4",
+  # 解码器
+  "mp3",
+  "aac",
+  "flac",
+  "vorbis",
+  "pcm",
+] }
+# 界面文件选择 → base64 文本过 IPC：浏览器 <input type=file> 只能拿到字节数组，
+# 编码成一个 JSON 字符串比逐字节数组小一个量级（随 tauri 进入依赖树，无需新增下载）
+base64 = "0.23"
 # ONNX 推理（onnxruntime 绑定；构建时下载 onnxruntime 并把 dll 复制到产物旁）
 ort = { version = "2.0.0-rc.13", default-features = false, features = [
   "std",

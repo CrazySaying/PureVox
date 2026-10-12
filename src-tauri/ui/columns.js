@@ -53,11 +53,18 @@ const specOf = (ptype) => NODES.find((n) => n.ptype === ptype)
 /**
  * 这一行要不要选设备。
  * 不需要设备的：`tone`（合成的测试音）、`remote_mic` / `remote_speaker`（网络，
- * 与声卡无关 —— 手机麦克风直接进引擎，不需要虚拟声卡驱动）。
+ * 与声卡无关 —— 网络麦克风直接进引擎，不需要虚拟声卡驱动）。
  */
 const DEVICE_LESS = new Set(['tone', 'remote_mic', 'remote_speaker'])
 const needsDevice = (kind, ptype) =>
   kind === 'output' ? !DEVICE_LESS.has(ptype) : kind === 'input' ? !DEVICE_LESS.has(ptype) : false
+
+/**
+ * `loopback` 输入行选的不是采集设备，而是**被回环的输出端点**（`session.rs` 按
+ * `loopback` / `loopback:<端点ID｜sink 名>` 解析），所以走 `farOptions` 那套
+ * 回环目标，不能塞输入设备列表——塞进去后端会拿输入设备 ID 当渲染端点打不开。
+ */
+const isLoopbackRow = (kind, ptype) => kind === 'input' && ptype === 'loopback'
 
 function lbl(text) {
   const s = document.createElement('span')
@@ -144,6 +151,23 @@ function deviceOptions(kind, selectedId) {
   return opts
 }
 
+/**
+ * 老配置里存的是**裸**端点 ID（`wasapi:...` / sink 名），没有 `loopback:` 前缀——
+ * 后端 `strip_prefix("loopback:").unwrap_or(d)` 照样认得，但界面对不上选项，
+ * 会误显示成「设备不在」。这里补上前缀，旧配置就能重新显示成正常条目。
+ */
+function normalizeLoopback(v) {
+  if (!v || v.startsWith('loopback')) return v || ''
+  return 'loopback:' + v
+}
+
+function loopbackOptions(selected) {
+  // `loopback` 输入行选的不是采集设备，而是**被回环的输出端点**；值形如
+  // `loopback`（系统默认输出）/ `loopback:<端点ID｜sink 名>`，与 AEC 远端同一套
+  // 取值规则（后端 `list_loopback_targets` 给出后者），故直接复用 `farOptions`。
+  return farOptions(normalizeLoopback(selected))
+}
+
 function farOptions(selected) {
   // 远端 = 输出/sink 的监视回环（`loopback` = 系统默认输出，`loopback:<sink>` = 指定），
   // 由后端 `list_loopback_targets` 给出（Linux = PipeWire sinks；Windows = WASAPI 端点）。
@@ -206,39 +230,46 @@ function paramControls(row, keys) {
 function rowElement(col, ci, row, ri) {
   const el = document.createElement('div')
   el.className = `row ${row.kind}`
+  if (!row.enabled) el.classList.add('disabled')
   const last = col.rows.length - 1
   const fixed = ri === 0 || ri === last
   const kind = row.kind
 
+  // 头部一行：类型徽标 + 类型下拉 + 动作区。行是 flex 纵向容器，头部单独一行，
+  // 下面的内容条数随便加——**高度由内容决定**（debug.css「布局铁律」）。
+  const head = document.createElement('div')
+  head.className = 'row-head'
+
   const badge = document.createElement('span')
   badge.className = 'badge'
   badge.textContent = kindName(kind)
-  el.appendChild(badge)
+  head.appendChild(badge)
 
   // 类型下拉（两端固定行也可换类型，只是不能删/移动）
   const ptype = select(nodesOf(kind).map((n) => [n.ptype, T(n.label)]), row.ptype, (v) => {
     row.ptype = v
     row.params = {}
-    // 无设备的行：测试音（合成）与网络行（手机麦克风 / 手机扬声器）
+    // 无设备的行：测试音（合成）与网络行（网络麦克风 / 网络扬声器）
     if (!needsDevice(kind, v)) row.device = null
     render()
     apply()
   })
   ptype.className = 'ptype'
-  el.appendChild(ptype)
+  head.appendChild(ptype)
 
-  // 动作区常驻（固定行用同格、同高的「固定」标签），避免出现/消失改变行高
+  // 动作区常驻（固定行用「固定」标签占位），避免出现/消失改变行高
   if (fixed) {
     const tag = document.createElement('span')
     tag.className = 'fixed-tag'
     tag.textContent = T('固定')
-    el.appendChild(tag)
+    head.appendChild(tag)
   } else {
     const acts = document.createElement('span')
     acts.className = 'row-actions'
     const mk = (text, title, fn, disabled) => {
       const b = document.createElement('button')
-      b.type = 'button'; b.textContent = text; b.title = title; b.disabled = !!disabled
+      b.type = 'button'; b.className = 'icon'; b.textContent = text; b.title = title
+      b.disabled = !!disabled
       b.addEventListener('click', fn)
       return b
     }
@@ -256,13 +287,19 @@ function rowElement(col, ci, row, ri) {
       col.rows.splice(ri, 1)
       render(); apply()
     }))
-    el.appendChild(acts)
+    head.appendChild(acts)
   }
+  el.appendChild(head)
 
-  // 细节行常驻（固定高）：输入/输出给设备下拉，处理给启用+参数，其余给提示占位
+  // 细节行：输入/输出给设备下拉，处理给启用+参数，其余给提示占位。
+  // **媒体行例外**：soundpad / player 的全部控件由 `media.js` 提供（音效网格 / 走带 /
+  // 每个音效的音量与热键），这里不能再画一遍通用参数控件，否则同一件事有两个入口。
+  const isMediaRow = kind === 'process' && (row.ptype === 'soundpad' || row.ptype === 'player')
   const detail = document.createElement('div')
   detail.className = 'detail'
-  if (kind === 'process') {
+  if (isMediaRow) {
+    // 媒体行不画 detail，由 media.js 接管
+  } else if (kind === 'process') {
     const lab = document.createElement('label')
     lab.className = 'en'
     const cb = document.createElement('input')
@@ -294,6 +331,19 @@ function rowElement(col, ci, row, ri) {
     })
     by.append(cb, document.createTextNode(T('直通')))
     detail.appendChild(by)
+  } else if (isLoopbackRow(kind, row.ptype)) {
+    // 电脑播放音频：选被回环的输出端点 + 行内增益（系统混音偏响，默认 -6 dB）
+    if (!row.device) row.device = 'loopback'
+    detail.appendChild(select(loopbackOptions(row.device), row.device, (v) => {
+      row.device = v
+      apply()
+    }))
+    detail.appendChild(paramControls(row, ['volume_db']))
+  } else if (kind === 'input' && row.ptype === 'remote_mic' ||
+             kind === 'output' && row.ptype === 'remote_speaker') {
+    // 网络行：**不画任何通用控件**。整张卡片由 `netrow.js` 提供，且刻意做得很小 ——
+    // 这一行是链路里的一环，不是主角：状态 + 地址 + 一枚小码 + 一个「重启」就够。
+    // 详细开关与说明在顶栏「手机」面板里。
   } else if (needsDevice(kind, row.ptype)) {
     detail.appendChild(select(deviceOptions(kind, row.device), row.device ?? '', (v) => {
       row.device = v || null
@@ -315,7 +365,7 @@ function rowElement(col, ci, row, ri) {
     d2.appendChild(lbl(T('远端')))
     // AEC 远端必选：缺省 = 系统默认输出（输出设备的声音就是 AEC 要消除的回声）
     if (!row.params.far_device) row.params.far_device = 'loopback'
-    d2.appendChild(select(farOptions(row.params.far_device), row.params.far_device, (v) => {
+    d2.appendChild(select(farOptions(normalizeLoopback(row.params.far_device)), normalizeLoopback(row.params.far_device), (v) => {
       row.params.far_device = v
       apply()
     }))
@@ -344,20 +394,35 @@ function rowElement(col, ci, row, ri) {
     d3.appendChild(num)
     const cal = document.createElement('button')
     cal.type = 'button'
+    cal.className = 'primary'
     cal.textContent = T('校准')
     cal.title = T('送扫频探针：测延时并自动配平近端 / 远端')
     cal.addEventListener('click', () => {
+      cal.disabled = true
+      cal.textContent = T('校准中')
       invoke('calibrate_aec_delay')
         .then((t) => window.__pvDebug?.('开始校准：' + t))
-        .catch((e) => window.__pvDebug?.('校准失败：' + e))
+        .catch((e) => {
+          // 失败原因必须**看得见**（顶栏校准状态串），不能只进调试日志
+          calSnap = { state: 'failed', value: '', reason: String(e) }
+          paintRecCal()
+          window.__pvDebug?.('校准失败：' + e)
+        })
+        .finally(() => {
+          cal.disabled = false
+          cal.textContent = T('校准')
+        })
     })
     d3.appendChild(cal)
     el.appendChild(d3)
+    const note = document.createElement('div')
+    note.className = 'detail3 cal-note'
+    note.textContent = T('远端就是 AEC 要消除的那只输出；校准会向它送扫频探针，测出延时并配平两端电平。')
+    el.appendChild(note)
   }
 
-  // TSE 行第 3 行：参考语音路径 + 录制按钮（录「降噪后」信号，音量归一化）
+  // TSE 行的第 3 条：参考语音路径 + 录制按钮（录「降噪后」信号，音量归一化）
   if (kind === 'process' && row.ptype === 'tse') {
-    el.classList.add('tall')
     const d2 = document.createElement('div')
     d2.className = 'detail2'
     d2.appendChild(paramControls(row, ['reference']))
@@ -372,6 +437,19 @@ function rowElement(col, ci, row, ri) {
     })
     d2.appendChild(rec)
     el.appendChild(d2)
+  }
+
+  // 网络行（网络麦克风 / 网络扬声器）：整张卡片交给 `netrow.js`——状态灯、启停重启、
+  // 地址与二维码、这行干什么的说明。跟媒体行同一个道理：控件只由一个模块画。
+  if ((kind === 'input' && row.ptype === 'remote_mic') ||
+      (kind === 'output' && row.ptype === 'remote_speaker')) {
+    if (window.__pvNetRow?.attach(el, ci, ri, row)) el.classList.add('net')
+  }
+
+  // 媒体处理行（音效板 / 播放器）：控制区交给 `media.js`（音效网格 + 走带控制 +
+  // 每个音效的全局热键 + 2 Hz 状态刷新都在那边，与本文件的行骨架解耦）。
+  if (isMediaRow && window.__pvMedia?.attach(el, ci, ri, row, { apply })) {
+    el.classList.add('media')
   }
   return el
 }
@@ -424,6 +502,9 @@ function columnElement(col, ci) {
 function render() {
   const host = $('audio-columns')
   if (!plan.columns.length) plan.columns.push(defaultColumn())
+  // 整表重渲染：先让 media.js 丢掉对旧 DOM 的引用（2 Hz 状态轮询按挂载表走）
+  window.__pvMedia?.reset()
+  window.__pvNetRow?.reset()
   host.replaceChildren(...plan.columns.map((c, i) => columnElement(c, i)))
 
   const add = document.createElement('button')
@@ -437,6 +518,37 @@ function render() {
   host.appendChild(add)
 }
 
+/**
+ * 把计划里缺 `loopback:` 前缀的回环值补上，返回是否改动过 —— 调用方据此落盘一次。
+ *
+ * **只在该值确实是已知回环目标时才补前缀**（裸 ID 与某个 `loopback:<id>` 去掉前缀后
+ * 相同）。否则不动：值可能本来就指向一只已经不存在的设备，那是「设备不在」的问题，
+ * 乱加前缀只会把它伪装成合法值。
+ */
+function migrateLoopbackIds(plan) {
+  const known = new Set(loopTargets.map((t) => t.id))
+  let changed = false
+  const fix = (v) => {
+    if (!v) return null
+    const norm = normalizeLoopback(v)
+    return norm !== v && known.has(norm) ? norm : null
+  }
+  for (const c of plan.columns || []) {
+    for (const r of c.rows || []) {
+      if (r.kind === 'input' && r.ptype === 'loopback') {
+        const v = fix(r.device)
+        if (v) { r.device = v; changed = true }
+      }
+      if (r.ptype === 'echo_cancel' && r.params && r.params.far_device) {
+        const v = fix(r.params.far_device)
+        if (v) { r.params.far_device = v; changed = true }
+      }
+    }
+  }
+  if (changed) window.__pvDebug?.('已把旧配置的回环设备值补上 loopback: 前缀')
+  return changed
+}
+
 // ---------- 顶栏状态串（录制 / 校准） ----------
 // Rust 侧的值是中文模板串（调试接口同源）：显示走 __pvTpl 按语言重排（zh 恒显原文），
 // 判定 / 参数回填用模板 id 与占位符取值，业务代码不写中文正则、不写中文拼接。
@@ -446,7 +558,7 @@ let calSnap = { state: '', value: '', reason: '' }
 const probeShow = (v, failPrefix) =>
   v.state === 'ok'
     ? window.__pvTpl(v.value)?.text ?? v.value
-    : v.state === 'unavailable'
+    : v.state === 'unavailable' || v.state === 'failed'
       ? failPrefix + v.reason
       : ''
 function paintRecCal() {
@@ -515,15 +627,36 @@ window.__pvOnSnapshot = (s) => {
     if (d.value.enumerated_at !== deviceStamp) {
       deviceStamp = d.value.enumerated_at
       if (plan) render()
+      // 刷新有结果了：把顶栏状态串从「正在刷新」收尾，别一直挂着
+      setStatus([T('设备已更新（{a} 入 / {b} 出）', {
+        a: devices.inputs.length,
+        b: devices.outputs.length,
+      })])
       window.__pvDebug?.(`设备列表已更新：输入 ${devices.inputs.length} / 输出 ${devices.outputs.length}`)
     }
   }
 }
 
 // ---------- 启动 ----------
+// 顶栏「刷新设备」：**必须给反馈**。以前点了按钮只是 `setStatus('正在刷新设备')`
+// 然后 `invoke('refresh_devices')`（Rust 侧静默 return），之后状态串再也不会变，
+// 看起来就是「按钮没用 / 被卡住」。现在按 Rust 回的话显示，并跟踪刷新状态。
 $('btn-refresh').addEventListener('click', () => {
+  const b = /** @type {HTMLButtonElement} */ ($('btn-refresh'))
+  b.disabled = true
   setStatus([T('正在刷新设备')])
   invoke('refresh_devices')
+    .then((msg) => {
+      setStatus([msg])
+      window.__pvDebug?.(T('刷新设备：') + msg)
+    })
+    .catch((e) => {
+      setStatus([T('刷新设备失败：') + e])
+      window.__pvDebug?.(T('刷新设备失败：') + e)
+    })
+    .finally(() => {
+      b.disabled = false
+    })
 })
 
 // 语言切换后重渲染列（静态串由 i18n.js 处理；顶栏状态串在此立即重排）
@@ -548,12 +681,17 @@ async function init() {
     plan = await invoke('get_plan')
     loopTargets = await invoke('list_loopback_targets')
     if (!plan || !plan.columns) plan = { columns: [defaultColumn()] }
+    // 老配置的回环值可能缺 `loopback:` 前缀 → 补上并落盘一次，之后界面与后端同一形态
+    const migrated = migrateLoopbackIds(plan)
     render()
+    if (migrated) apply()
     setStatus([])
     window.__pvDebug?.('界面就绪')
   } catch (e) {
+    // 带 stack 上报：只报 message 的话前端报错没法定位（迁移期可诊断性优先）
+    const st = e && e.stack ? String(e.stack).split('\n').slice(0, 5).join(' ⏎ ') : ''
     setStatus([T('初始化失败：') + e])
-    window.__pvDebug?.('界面初始化失败：' + e)
+    window.__pvDebug?.('界面初始化失败：' + e + (st ? ' ⏎ ' + st : ''))
   }
 }
 

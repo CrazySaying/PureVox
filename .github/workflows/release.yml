@@ -279,7 +279,7 @@ jobs:
         working-directory: android
         run: |
           chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon -PpvVersion="$VERSION"
+          ./gradlew assembleDebug --no-daemon -PpvVersion="$VERSION" -PpvVersionCode="$ACODE"
 
       - name: Stage APK
         run: |
@@ -320,9 +320,32 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           cd artifacts
+          # 统一重命名成「PureVox-<版本>-<平台>.<扩展名>」：更新检查（桌面 src/update/
+          # 与安卓 App）按**文件名后缀**认领本平台产物，不看版本号（版本号只有年月日，
+          # 同日会重复），故文件名必须稳定。步骤：按后缀分拣 → 重命名 → 挂上去。
+          shopt -s nullglob
+          stage() { # <稳定名> <匹配通配>
+            local out="$1"; shift
+            local f
+            for f in "$@"; do
+              [ -e "$f" ] || continue
+              cp -f "$f" "$out" && return 0
+            done
+            return 1
+          }
+          mkdir -p out
+          stage "out/PureVox-${{ env.VERSION }}-windows-x64-setup.exe" */*-setup.exe || echo "!! 缺 Windows NSIS 安装包"
+          stage "out/PureVox-${{ env.VERSION }}-windows-x64.msi"       */*.msi       || echo "!! 缺 Windows MSI"
+          stage "out/PureVox-${{ env.VERSION }}-linux-x64.AppImage"    */*.AppImage  || echo "!! 缺 AppImage"
+          stage "out/PureVox-${{ env.VERSION }}-linux-x64.deb"         */*.deb       || echo "!! 缺 deb"
+          stage "out/PureVox-${{ env.VERSION }}-linux-x64.rpm"         */*.rpm       || echo "!! 缺 rpm"
+          stage "out/PureVox-${{ env.VERSION }}-android-arm64.apk"     */*.apk       || echo "!! 缺 APK"
+          cd out
           files=$(find . -type f | sort | tr '\n' ' ')
+          echo "release assets: $files"
+          cd ..
           gh release create "${{ github.ref_name }}" \
             --repo "${{ github.repository }}" \
-            --title "PureVox ${{ github.ref_name }}" \
+            --title "PureVox ${{ env.VERSION }}" \
             --notes-file "$GITHUB_WORKSPACE/notes.md" \
             $files

@@ -17,7 +17,7 @@
 
 //! WebSocket 服务（DESIGN.md §4.1）：一个端口承载三条能力。
 //!
-//! - `/ws` 音频 + 控制；`/health` 局域网自检（手机端与人都能看）
+//! - `/` 网页版客户端（二维码指向这里，扫码即开）；`/ws` 音频 + 控制；`/health` 局域网自检
 //! - 每连接一份 Opus 编解码器；断开即销毁
 //! - 出站按**绝对时刻 10 ms 节拍**取 hop（与列工作线程同一套节拍纪律，DESIGN.md §3.3），
 //!   欠载补静音包而不是停发（时钟不断，客户端不会累积延迟）
@@ -49,12 +49,25 @@ const IDLE_TIMEOUT: u64 = 60;
 /// 路由表（跨平台）。`Arc<NetHub>` 作为 axum 状态。
 pub fn router(hub: Arc<NetHub>) -> Router {
   Router::new()
+    .route("/", get(web_page))
     .route("/ws", get(ws_entry))
     .route("/health", get(health))
     .with_state(hub)
 }
 
 /// WebSocket 升级入口。
+/// 网页版客户端（`GET /`）。二维码指向这里，扫码即开；它自己连 `/ws`，协议与 APK 同源。
+async fn web_page() -> impl IntoResponse {
+  use axum::http::header::{CONTENT_TYPE, HeaderValue};
+  (
+    [(
+      CONTENT_TYPE,
+      HeaderValue::from_static("text/html; charset=utf-8"),
+    )],
+    super::webclient::PAGE,
+  )
+}
+
 async fn ws_entry(
   axum::extract::State(hub): axum::extract::State<Arc<NetHub>>,
   ws: WebSocketUpgrade,

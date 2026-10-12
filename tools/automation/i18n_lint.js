@@ -255,12 +255,15 @@ for (const f of jsFiles) {
   const lines = src.split('\n')
   const block = streamBlockRange(src)
   for (const lit of scanJs(src)) {
+    // **先**登记 T() 的 msgid，再按是否含中文决定要不要做 E1/E2 检查。
+    // 纯 ASCII 的 msgid 也存在（如占位符模板 '{state} {pos} / {dur}'），
+    // 若在这里被 CJK 过滤掉，它永远进不了 usedKeys，W1 会恒报孤儿键。
+    if (lit.inT && !lit.dbg) usedKeys.add(lit.text)
     if (!CJK.test(lit.text)) continue
     const lineText = lines[lit.line - 1] ?? ''
     if (/^\s*(\/\/|\*|\/\*)/.test(lineText)) continue // 整行注释
     if (lit.dbg) continue // __pvDebug / console 调试输出 = 调试日志，不翻译
     if (lit.inT) {
-      usedKeys.add(lit.text)
       if (!Object.prototype.hasOwnProperty.call(EN, lit.text)) {
         err(label, lit.line, `E2 T() msgid 不在字典：${JSON.stringify(lit.text)}`)
       }

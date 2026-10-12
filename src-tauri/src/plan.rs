@@ -20,6 +20,7 @@
 //! 一列 = 有序的行列表；首行必须是输入、末行必须是输出，中间可任意增删/拖动。
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -105,4 +106,49 @@ pub fn validate(plan: &Plan) -> Vec<String> {
     }
   }
   problems
+}
+
+/// 计划里所有 `soundpad` 行的音效热键（`pads` 参数 JSON 的 `hotkey` 字段），
+/// 逐条转成「规范串 → 触发该音效」的热键绑定。
+///
+/// **音效热键跟着计划走**（与 legacy `uitk/main_window.py` 的 `pad:<i>` 同一位置），
+/// 不另设一份设置：增删音效 = 结构性变更 → `apply_plan` → 重建会话 + 重注册热键。
+pub fn pad_hotkeys(plan: &Plan, hub: crate::debug::SharedHub) -> Vec<crate::hotkey::Binding> {
+  let mut out = Vec::new();
+  for (ci, c) in plan.columns.iter().enumerate() {
+    for (ri, r) in c.rows.iter().enumerate() {
+      if r.kind != RowKind::Process || r.ptype != "soundpad" || !r.enabled {
+        continue;
+      }
+      let Some(raw) = r.params.get("pads") else {
+        continue;
+      };
+      let pads: Vec<crate::engine::components::soundpad::PadCfg> = match serde_json::from_str(raw) {
+        Ok(p) => p,
+        Err(_) => continue, // 列表坏了不该拖垮热键（会话那边会报参数问题）
+      };
+      for (i, pad) in pads.iter().enumerate() {
+        let spec = crate::hotkey::normalize_spec(&pad.hotkey);
+        if spec.is_empty() {
+          continue;
+        }
+        let hub2 = hub.clone();
+        out.push((
+          spec,
+          Arc::new(move || {
+            // `slot()` 返回 `Option<Arc<MediaSlot>>`，`Option::inspect` 对 Some 调闭包，
+            // 于是 `s.send(..)` 自动解引用到 MediaSlot——会话没运行时这里就是 no-op。
+            crate::engine::media::hub()
+              .slot(ci, ri)
+              .inspect(|s| s.send(crate::engine::media::MediaCmd::SoundpadPlay(i)));
+            hub2.push_ui(
+              "info",
+              format!("音效热键：第 {} 列第 {} 行 第 {} 个", ci + 1, ri + 1, i + 1),
+            );
+          }) as Arc<dyn Fn() + Send + Sync>,
+        ));
+      }
+    }
+  }
+  out
 }

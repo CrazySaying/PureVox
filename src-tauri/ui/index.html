@@ -30,6 +30,7 @@
       <button id="btn-settings" type="button" data-i18n="设置">设置</button>
       <button id="btn-run" type="button" class="run-start" data-i18n="启动">启动</button>
       <button id="btn-refresh" type="button" data-i18n="刷新设备">刷新设备</button>
+      <button id="btn-update" type="button" data-i18n="更新">更新</button>
       <button id="btn-drivers" type="button" data-i18n="驱动">驱动</button>
       <button id="btn-debug" type="button" data-i18n="调试面板">调试面板</button>
       <button id="btn-devtools" type="button" data-i18n="开发者工具">开发者工具</button>
@@ -113,20 +114,37 @@
             <tr><th data-i18n="参考录制">参考录制</th><td id="audio-recorder" colspan="3"></td></tr>
             <tr><th data-i18n="延时校准">延时校准</th><td id="audio-calib" colspan="3"></td></tr>
           </table>
-
+          <!-- 网络只留只读状态行；开关、二维码、远程输入都在网络行卡片里（见 netrow.js） -->
           <h3 data-i18n="网络">网络</h3>
           <table class="kv">
-            <tr><th data-i18n="手机 ⇄ 电脑">手机 ⇄ 电脑</th><td id="net-status" colspan="3"></td></tr>
+            <tr><th data-i18n="客户端 ⇄ 电脑">客户端 ⇄ 电脑</th><td id="net-status" colspan="3"></td></tr>
           </table>
-          <div class="set-row">
-            <button id="net-start" type="button" data-i18n="启动服务">启动服务</button>
-            <button id="net-stop" type="button" data-i18n="停止服务">停止服务</button>
-            <label class="topcheck"><input id="net-remote-input" type="checkbox" /><span data-i18n="远程输入（打字 + 键盘）">远程输入（打字 + 键盘）</span></label>
-          </div>
-          <p class="note" data-i18n="同网段直连且无鉴权：同一 Wi-Fi 下的任何设备都能连上。">同网段直连且无鉴权：同一 Wi-Fi 下的任何设备都能连上。</p>
         </section>
       </section>
     </main>
+
+
+    <!-- 更新面板：查 GitHub Releases → 下载 → 安装（见 update.js / src/update/） -->
+    <div id="update" class="panel hidden">
+      <div class="panel-box">
+        <h3 data-i18n="更新">更新</h3>
+        <table class="kv">
+          <tr><th data-i18n="当前版本">当前版本</th><td id="up-cur" colspan="3" class="mono"></td></tr>
+          <tr><th data-i18n="最新版本">最新版本</th><td id="up-latest" colspan="3" class="mono"></td></tr>
+          <tr><th data-i18n="状态">状态</th><td id="up-state" colspan="3"></td></tr>
+        </table>
+        <p class="note" id="up-notes"></p>
+        <div class="set-row">
+          <button id="up-check" type="button" data-i18n="检查更新">检查更新</button>
+          <button id="up-download" type="button" data-i18n="下载更新">下载更新</button>
+          <button id="up-install" type="button" data-i18n="安装更新">安装更新</button>
+          <button id="up-page" type="button" data-i18n="打开发布页">打开发布页</button>
+        </div>
+        <div class="set-foot">
+          <button id="up-close" type="button" data-i18n="关闭">关闭</button>
+        </div>
+      </div>
+    </div>
 
     <!-- 设置面板（通用 / 热键 / 提示音 / 关于） -->
     <div id="settings" class="panel hidden">
@@ -221,7 +239,10 @@
     <script src="drivers_windows.js"></script>
     <script src="drivers.js"></script>
     <script src="settings.js"></script>
-    <script src="net.js"></script>
+    <script src="update.js"></script>
+    <script src="qrcode.js"></script>
+    <script src="netrow.js"></script>
+    <script src="media.js"></script>
     <script src="columns.js"></script>
     <script src="debug.js"></script>
   </body>
