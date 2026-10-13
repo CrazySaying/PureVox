@@ -691,8 +691,13 @@ td { padding: 3px 8px 3px 0; overflow: hidden; text-overflow: ellipsis; }
 .netcard-far { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; }
 .netcard-locked { color: var(--muted); font-size: 12px; padding: 3px 8px;
   border: 1px dashed var(--line-strong); border-radius: var(--r-sm); }
-.netcard-sel { font: inherit; font-size: 12px; color: var(--fg); background: var(--bg-2);
-  border: 1px solid var(--line-strong); border-radius: var(--r-sm); padding: 4px 6px; }
+/* 网络行里的下拉（网卡 / AEC 远端来源）与全局 `select` 样式**共用同一套外观**：
+   这里只调布局（宽度与伸缩），配色 / 边框 / 高度一律不写 —— 另起一套就会和别处的下拉
+   对不上，换主题时也只改得到一半（AGENTS.md §4 的「一个功能只有一条实现路径」同理）。 */
+.netcard-ifsel { flex: 1 1 16em; min-width: 8em; max-width: 26em; }
+/* 端口框定宽 + 等宽数字（`mono` 已带 `tabular-nums`）：改端口时宽度不能跳，
+   否则光标位置会飘。 */
+.netcard-port { width: 6em; flex: 0 0 auto; }
 
 /* 滚动条：细一点，别抢视觉 */
 ::-webkit-scrollbar { width: 10px; height: 10px; }

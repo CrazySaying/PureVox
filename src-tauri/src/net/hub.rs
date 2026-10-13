@@ -24,7 +24,7 @@
 //! 两个方向都是**有界**的：目标 50 ms、硬顶 80 ms，超限丢最旧（保新）。
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 
 use crate::audio::{HOP, SAMPLE_RATE};
@@ -238,6 +238,11 @@ pub struct NetHub {
   /// hop 同源 —— AEC 的 `FarHistory` 序号网格才对得上。
   tx_last: Mutex<([f32; HOP], u64)>,
   running: AtomicBool,
+  /// 实际监听端口。默认 `proto::PORT`，界面可改（DESIGN.md §4.1.1）。
+  ///
+  /// 之所以是运行时值而不是常量：端口被别的程序占掉时，用户要能换一个。改完走
+  /// `net_restart` 重绑 —— 端口是绑定那一刻定死的，改字段本身不会换掉已开的监听。
+  port: AtomicU16,
 }
 
 impl Default for NetHub {
@@ -259,6 +264,7 @@ impl NetHub {
       tx_last: Mutex::new(([0.0f32; HOP], 0u64)),
       stats: Mutex::new(NetStats::default()),
       running: AtomicBool::new(false),
+      port: AtomicU16::new(crate::net::proto::PORT),
     }
   }
 
@@ -270,6 +276,18 @@ impl NetHub {
 
   pub fn is_running(&self) -> bool {
     self.running.load(Relaxed)
+  }
+
+  // ---- 监听端口（可编辑，见 DESIGN.md §4.1.1）----
+
+  /// 下次 `start()` 要绑的端口。**不是当前已绑的端口** —— 改这个字段本身不会换掉
+  /// 已开的监听，得配一次 `restart()`。
+  pub fn port(&self) -> u16 {
+    self.port.load(Relaxed)
+  }
+
+  pub fn set_port(&self, v: u16) {
+    self.port.store(v, Relaxed);
   }
 
   // ---- 远程输入开关 ----
@@ -399,7 +417,8 @@ impl NetHub {
   /// 调试快照用的统计克隆（同时带上 opus 库探测）。
   pub fn stats(&self) -> NetStats {
     let mut s = self.stats.lock().unwrap().clone();
-    s.port = crate::net::proto::PORT;
+    // 端口报「下次会绑的那个」：服务没开时这就是用户填的值，比报常量有用
+    s.port = self.port();
     s.subs = self.sub_count();
     s.rx_level = self.rx_level();
     s.remote_input = self.remote_input();

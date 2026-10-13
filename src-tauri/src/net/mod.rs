@@ -66,14 +66,15 @@ static TASK: Mutex<Option<tauri::async_runtime::JoinHandle<()>>> = Mutex::new(No
 pub fn start() -> Result<String, String> {
   let h = hub();
   if h.is_running() {
-    return Ok(format!("已在运行（端口 {}）", proto::PORT));
+    return Ok(format!("已在运行（端口 {}）", h.port()));
   }
   // 缺 opus.dll 时先报出来：网络功能没有编解码器就是死的
   opus_sys::probe()?;
   // 上一次没走 stop()（比如启动后崩过）时先收干净，否则端口还占着
   stop();
   let app = server::router(h.clone());
-  let addr = std::net::SocketAddr::from((BIND_ADDR, proto::PORT));
+  let port = h.port();
+  let addr = std::net::SocketAddr::from((BIND_ADDR, port));
   let hh = h.clone();
   let handle = tauri::async_runtime::spawn(async move {
     match tokio::net::TcpListener::bind(addr).await {
@@ -85,17 +86,13 @@ pub fn start() -> Result<String, String> {
         }
       }
       Err(e) => {
-        hh.set_last_error(format!("端口 {} 绑定失败：{e}", proto::PORT));
+        hh.set_last_error(format!("端口 {} 绑定失败：{e}", port));
         hh.set_running(false);
       }
     }
   });
   *TASK.lock().map_err(|_| "服务锁已中毒".to_string())? = Some(handle);
-  Ok(format!(
-    "已启动，监听 {}:{}（局域网可达）",
-    addr.ip(),
-    proto::PORT
-  ))
+  Ok(format!("已启动，监听 {}:{}（局域网可达）", addr.ip(), port))
 }
 
 /// 停服务（幂等）：真的 abort 掉监听任务，不只是清状态位。
@@ -117,9 +114,60 @@ pub fn restart() -> Result<String, String> {
   start()
 }
 
+/// 启动时把上次选定的端口读进 hub。**必须在第一次 `start()` 之前调**，
+/// 否则用户填的端口每次启动都白填（hub 默认 59123）。
+pub fn load_settings() {
+  let p = crate::config::load_settings().net_port;
+  if p != 0 {
+    hub().set_port(p);
+  }
+}
+
+/// 要广告给客户端的地址：卡片上选的那张；没选、**或那张已经不属于本机了**（换了 Wi-Fi、
+/// 拔了 USB 共享、DHCP 换了地址）就用默认路由那张。
+///
+/// 回落是刻意的：死地址比"不是用户想要的那张"更难排查 —— 界面显示一个连不上的 IP，
+/// 用户只会怀疑服务坏了。所以先验明这张卡现在真的还在，再拿它去广告。
+pub fn advertised_ip() -> String {
+  let list = addrs::list();
+  pick_advertised_ip(
+    &crate::config::load_settings().net_ip,
+    &list,
+    &addrs::default_ip(),
+  )
+}
+
+/// 挑广告地址的**纯函数**部分（`advertised_ip` 那一半要读设置、要摸网卡，不适合直接测）。
+///
+/// 选中项必须在**当前的**网卡列表里才作数：选过的网卡可能被拔掉（USB 共享、蓝牙共享、
+/// 移动热点），DHCP 也可能换地址。报一个已经不属于本机的 IP 比报默认路由那张更难排查 ——
+/// 用户只会怀疑服务坏了。
+fn pick_advertised_ip(want: &str, list: &[addrs::NetIface], dflt: &str) -> String {
+  if !want.is_empty() && list.iter().any(|n| n.ip == want) {
+    want.to_string()
+  } else {
+    dflt.to_string()
+  }
+}
+
+/// 记下选中的广告地址并落盘。空串 = 回到自动（默认路由那张）。
+pub fn set_advertised_ip(ip: &str) -> Result<(), String> {
+  let mut s = crate::config::load_settings();
+  s.net_ip = ip.trim().to_string();
+  crate::config::save_settings(&s)
+}
+
+/// 记下新端口并落盘。**不重启** —— 调用方（`net_set_port` 命令）决定要不要重启。
+pub fn set_port(p: u16) -> Result<(), String> {
+  let mut s = crate::config::load_settings();
+  s.net_port = p;
+  crate::config::save_settings(&s)
+}
+
 /// 服务状态文字（界面与调试接口共用）。
 pub fn status() -> String {
-  let s = hub().stats();
+  let h = hub();
+  let s = h.stats();
   let codec = match &s.codec {
     crate::debug::Probe::Ok { value } => value.clone(),
     crate::debug::Probe::Unavailable { reason } => format!("编解码器不可用：{reason}"),
@@ -136,7 +184,9 @@ pub fn status() -> String {
   let ms = |v: usize| v as f64 / crate::audio::SAMPLE_RATE as f64 * 1000.0;
   format!(
     "{}：端口 {}，客户端 {}，订阅音频 {}，入站 {:.0} ms，出站已发 {} 包（水位 {:.0} ms）；{input}；{codec}",
-    if s.port > 0 {
+    // 就绪与否看 `is_running()`，不能看 `port > 0` —— 端口是**下次要绑的**那个值，
+    // 恒为正数，服务没开时也一样（端口改成可编辑之后这个判据就废了）
+    if h.is_running() {
       "服务就绪"
     } else {
       "服务未启动"
@@ -171,5 +221,65 @@ mod tests {
   #[test]
   fn remote_input_defaults_closed() {
     assert!(!hub().remote_input());
+  }
+
+  /// 端口改成可编辑之后 `stats().port` **恒为正数**（它是「下次要绑的」那个值，
+  /// 服务没开时也是 59123）。所以就绪判据必须换成 `is_running()`，否则界面永远显示
+  /// 「服务就绪」，启动 / 停止 两个按钮的禁用状态也跟着全错。
+  #[test]
+  fn 就绪与否看运行状态不只看端口() {
+    let s = status();
+    assert_eq!(
+      s.starts_with("服务就绪"),
+      hub().is_running(),
+      "状态串与 is_running() 不一致：{s}"
+    );
+  }
+
+  #[test]
+  fn 端口可改且回落默认() {
+    let orig = hub().port();
+    hub().set_port(59124);
+    assert_eq!(hub().port(), 59124);
+    assert!(status().contains("59124"), "{}", status());
+    hub().set_port(orig);
+  }
+
+  /// 广告地址必须**先验明这张卡现在还在**再拿去广告：选过的网卡可能被拔掉（USB 共享、
+  /// 蓝牙共享）、DHCP 也可能换了地址。报一个已经不属于本机的 IP 比报默认路由那张更难
+  /// 排查 —— 用户只会怀疑服务坏了。
+  ///
+  /// 只测纯函数那一半：读真设置 / 摸真网卡的 `advertised_ip()` 不在测试里跑（会写用户
+  /// 的 `settings.json`）。
+  #[test]
+  fn 失效的选定地址回落默认() {
+    let list = vec![
+      addrs::NetIface {
+        ip: "192.168.1.5".into(),
+        name: "WLAN".into(),
+        desc: "WLAN".into(),
+        is_default: true,
+      },
+      addrs::NetIface {
+        ip: "192.168.7.1".into(),
+        name: "以太网 4".into(),
+        desc: "USB 以太网".into(),
+        is_default: false,
+      },
+    ];
+    // 选中的还在 → 用它
+    assert_eq!(
+      pick_advertised_ip("192.168.7.1", &list, "192.168.1.5"),
+      "192.168.7.1"
+    );
+    // 选中的已经拔了 → 回落默认路由，不能拿死地址去广告
+    assert_eq!(
+      pick_advertised_ip("192.168.9.9", &list, "192.168.1.5"),
+      "192.168.1.5"
+    );
+    // 没选过 → 默认路由
+    assert_eq!(pick_advertised_ip("", &list, "192.168.1.5"), "192.168.1.5");
+    // 一张网卡都没有时给空串，不给伪造的 0 / 空地址（界面据此显示「不可用 + 原因」）
+    assert_eq!(pick_advertised_ip("", &[], ""), "");
   }
 }

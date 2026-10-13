@@ -360,9 +360,11 @@ fn net_set_remote_input(on: bool) -> Result<String, String> {
   })
 }
 
-/// 网络行卡片展示用：本机在局域网的 IP 与**网页版客户端地址**（`http://<ip>:59123/`）。
-/// 取 IP 用 UDP 小技巧（连一个公网地址的本地面，不发包也不需连网）；失败时
-/// `ip` 为空、`reason` 说明原因（界面显示「不可用 + 原因」，不显示伪造的 0）。
+/// 网络行卡片展示用：本机在局域网的 IP 与**网页版客户端地址**（`http://<ip>:<port>/`）。
+///
+/// IP 用 `net::advertised_ip()`：卡片上选的那张，没有（或已经失效）就用默认路由那张。
+/// 端口用 `net::hub().port()`：用户改过的那个，不是写死的 59123。
+/// 取不到时 `ip` 为空、`reason` 说明原因（界面显示「不可用 + 原因」，不显示伪造的 0）。
 /// 注意给的是 `http://` 不是 `ws://`：二维码要能扫出**能打开的网页**。
 #[derive(serde::Serialize)]
 struct NetLocalAddr {
@@ -374,31 +376,91 @@ struct NetLocalAddr {
 
 #[tauri::command]
 fn net_local_addr() -> NetLocalAddr {
-  let port = net::proto::PORT;
+  let port = net::hub().port();
   let fail = |reason: String| NetLocalAddr {
     ip: String::new(),
     port,
     url: String::new(),
     reason,
   };
-  let sock = match std::net::UdpSocket::bind("0.0.0.0:0") {
-    Ok(s) => s,
-    Err(e) => return fail(format!("取本机地址失败：{e}")),
-  };
-  if sock.connect("8.8.8.8:80").is_err() {
-    return fail("取本机地址失败：无法确定默认路由出口".into());
+  let ip = net::advertised_ip();
+  if ip.is_empty() {
+    return fail("取本机地址失败：本机没有可直连局域网的网卡（Wi-Fi / 有线都没连？）".into());
   }
-  match sock.local_addr() {
-    Ok(a) => NetLocalAddr {
-      ip: a.ip().to_string(),
-      port,
-      // 给人看的地址是 **http://**，不是 ws:// —— `ws://` 只在扫码后的网页版
-      // 客户端内部用（它自己拼 `/ws`）。二维码指向 ws:// 的话手机会当普通文本，
-      // 扫码后什么也不会发生。
-      url: format!("http://{}:{}/", a.ip(), port),
-      reason: String::new(),
-    },
-    Err(e) => fail(format!("取本机地址失败：{e}")),
+  NetLocalAddr {
+    // 给人看的地址是 **http://**，不是 ws:// —— `ws://` 只在扫码后的网页版
+    // 客户端内部用（它自己拼 `/ws`）。二维码指向 ws:// 的话手机会当普通文本，
+    // 扫码后什么也不会发生。
+    url: format!("http://{ip}:{port}/"),
+    ip,
+    port,
+    reason: String::new(),
+  }
+}
+
+/// 列出可供局域网直连的网卡（卡片上的子网下拉）。
+///
+/// **不过滤网卡类型**：USB 共享、蓝牙共享、Wi-Fi 热点共享、有线、VPN、虚拟网卡全都是
+/// 能直连的可用网卡，按 `IF_TYPE` 过滤反而会把有用的滤掉。只滤掉回环与链路本地 ——
+/// 那两种客户端连不上，列出来只是让人去试一个必然失败的地址。
+#[tauri::command]
+fn net_ifaces() -> Vec<net::addrs::NetIface> {
+  net::addrs::list()
+}
+
+/// 选一张网卡对外广告（只换二维码 / 显示 / 复制的内容，**不重启服务**）。
+///
+/// 服务绑的是 `0.0.0.0:port`，所有网卡本来就都在服务里；选子网只是决定**把哪个地址
+/// 告诉客户端**。为这个重启会把已连着的客户端全踢掉，而实际什么都没变
+/// （DESIGN.md §4.1.1）。
+#[tauri::command]
+fn net_select_ip(ip: String) -> Result<String, String> {
+  let ip = ip.trim();
+  if ip.is_empty() {
+    net::set_advertised_ip("")?;
+    return Ok("已改为自动选择（默认路由那张网卡）".into());
+  }
+  let ok = ip.parse::<std::net::Ipv4Addr>().ok().filter(|a| {
+    let s = a.to_string();
+    !s.starts_with("127.") && !s.starts_with("169.254.")
+  });
+  if ok.is_none() {
+    return Err(format!(
+      "{ip} 不是可用的局域网 IPv4 地址（回环与链路本地都不行）"
+    ));
+  }
+  net::set_advertised_ip(ip)?;
+  Ok(format!(
+    "已改为通过 {ip} 对外（服务不用重启，本来就监听所有网卡）"
+  ))
+}
+
+/// 改监听端口。**端口是绑定那一刻定死的，所以这里直接重启服务**，省得用户再点一次。
+/// 服务没在跑就只存下，下次启动生效。范围限 1024~65535：1024 以下在 Unix 上要 root，
+/// 而且 47821 是调试接口、别来抢。
+#[tauri::command]
+fn net_set_port(port: u16) -> Result<String, String> {
+  if port < 1024 {
+    return Err(format!(
+      "端口 {port} 太小（要 ≥ 1024，低端口在 Linux 上需要管理员权限）"
+    ));
+  }
+  if port == debug::DEBUG_HTTP_PORT {
+    return Err(format!("端口 {port} 是本机调试接口占着的，换一个"));
+  }
+  let was = net::hub().port();
+  net::set_port(port)?;
+  net::hub().set_port(port);
+  if was == port {
+    return Ok(format!("端口已经是 {port}，没变"));
+  }
+  if net::hub().is_running() {
+    let r = net::restart()?;
+    Ok(format!(
+      "端口 {was} → {port}，{r}（已连着的客户端需要重新连）"
+    ))
+  } else {
+    Ok(format!("端口 {was} → {port}（服务没在跑，下次启动生效）"))
   }
 }
 #[tauri::command]
@@ -515,6 +577,9 @@ fn main() {
         let _ = w.set_title(&format!("PureVox {}", version::VERSION));
       }
       setup_tray(app)?;
+      // 读回上次选定的网络端口 / 广告地址。不读的话用户填的端口每次启动都白填
+      // （hub 默认 59123），必须在第一次 `net_start` 之前。
+      net::load_settings();
       start_hotkey(app.handle(), &app.state::<HotkeyHost>());
       // 初始状态同步窗口图标
       sync_tray(app.handle(), app.state::<Arc<AudioManager>>().is_running());
@@ -593,6 +658,9 @@ fn main() {
       net_running,
       net_set_remote_input,
       net_local_addr,
+      net_ifaces,
+      net_select_ip,
+      net_set_port,
       virtual_mic_status,
       virtual_mic_create,
       virtual_mic_remove,

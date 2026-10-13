@@ -28,12 +28,34 @@ use windows::Win32::NetworkManagement::IpHelper::{
   GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER, GAA_FLAG_SKIP_MULTICAST, GetAdaptersAddresses,
   IP_ADAPTER_ADDRESSES_LH,
 };
-use windows::Win32::Networking::WinSock::{ADDRESS_FAMILY, AF_INET, SOCKADDR, SOCKADDR_IN};
+use windows::Win32::Networking::WinSock::{
+  ADDRESS_FAMILY, AF_INET, SOCKADDR, SOCKADDR_IN, WSADATA, WSAStartup,
+};
 
 use super::NetIface;
 
+/// `GetAdaptersAddresses` 是 **Winsock 函数，必须先 `WSAStartup`**。
+///
+/// 不调会拿到 `ERROR_INVALID_PARAMETER (87)`，枚举结果空得像一台没网卡的机器 —— 界面
+/// 上子网下拉只剩「自动」一项，用户根本选不了别的网卡。而且**不能指望别人替我们初始化
+/// 过**：本进程可能整个生命周期都不碰 socket（服务没启动、会话没跑），`WSAStartup`
+/// 要等到 axum 建监听或 cpal 开流时才发生，那时机往往晚于第一次枚举。
+///
+/// `WSACleanup` 不调：Winsock 的引用计数由每次 `WSAStartup` 自增，漏掉反向调用只会让
+/// 计数偏高（不影响功能），而多调一次会真的把别人已经建好的 socket 拆了。
+fn ensure_winsock() {
+  static ONCE: std::sync::Once = std::sync::Once::new();
+  ONCE.call_once(|| {
+    // SAFETY: 只往 `data`（本地栈变量）里写；返回码不用管——初始化真失败的话下面的
+    // `GetAdaptersAddresses` 自己会报错，我们据此给空列表，界面上显示「不可用 + 原因」。
+    unsafe {
+      let mut data = WSADATA::default();
+      let _ = WSAStartup(0x0202, &mut data); // 要求 2.2
+    }
+  });
+}
+
 /// 默认路由那张网卡：UDP 连一个公网地址，取本地地址 —— 不发包也不需要真的连上。
-#[allow(dead_code)]
 fn default_ip_via_udp() -> String {
   for target in ["8.8.8.8:80", "1.1.1.1:80"] {
     if let Ok(s) = UdpSocket::bind("0.0.0.0:0")
@@ -46,18 +68,20 @@ fn default_ip_via_udp() -> String {
   String::new()
 }
 
-#[allow(dead_code)]
 pub fn enumerate() -> Vec<NetIface> {
+  ensure_winsock();
   let dflt = default_ip_via_udp();
   let mut out = Vec::new();
 
-  // 先按估计长度取，返回 BUFFER_OVERFLOW 就按它给的长度重来一次
+  // 参数顺序：**第 1 个是地址族，第 2 个才是 flag**。写反了（拿缓冲区长度当前 1 个）会
+  // 得到 `ERROR_INVALID_PARAMETER (87)`，而且不报别的错——就是一张空网卡列表，看起来
+  // 像「这台机器没网卡」。
   let flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
   let mut size: u32 = 16 * 1024;
   let mut buf = vec![0u8; size as usize];
   let mut rc: u32 = unsafe {
     GetAdaptersAddresses(
-      size,
+      AF_INET.0 as u32,
       flags,
       None,
       Some(buf.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH),
@@ -68,7 +92,7 @@ pub fn enumerate() -> Vec<NetIface> {
     buf = vec![0u8; size as usize];
     rc = unsafe {
       GetAdaptersAddresses(
-        size,
+        AF_INET.0 as u32,
         flags,
         None,
         Some(buf.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH),
@@ -102,12 +126,17 @@ pub fn enumerate() -> Vec<NetIface> {
         continue;
       }
       let sa = unsafe { &*u.Address.lpSockaddr };
-      if sa.sa_family != ADDRESS_FAMILY(AF_INET.0 as u16) {
+      if sa.sa_family != ADDRESS_FAMILY(AF_INET.0) {
         continue;
       }
       // sockaddr_in 的 sin_addr 在结构体偏移 4 处（sa_family 占 2 字节，端口 2 字节）
       let sin = unsafe { &*(sa as *const SOCKADDR as *const SOCKADDR_IN) };
-      let ip = Ipv4Addr::from(unsafe { sin.sin_addr.S_un.S_addr }).to_string();
+      // `S_addr` 是**按网络字节序躺在内存里的 u32**，不能直接喂 `Ipv4Addr::from`：
+      // `from(u32)` 按大端解释，于是每台机器都会拿到反过来的地址
+      // （172.26.38.56 → 56.38.26.172），而反过来的地址照样长得像一个 IP，连回环过滤都
+      // 滤不掉。`to_ne_bytes()` 拿到的就是内存里那 4 个字节本身，两种字节序下都对。
+      let b = unsafe { sin.sin_addr.S_un.S_addr }.to_ne_bytes();
+      let ip = Ipv4Addr::new(b[0], b[1], b[2], b[3]).to_string();
       // 回环与链路本地手机都连不上，直接不列
       if ip.starts_with("127.") || ip.starts_with("169.254.") {
         continue;
@@ -124,7 +153,6 @@ pub fn enumerate() -> Vec<NetIface> {
   out
 }
 
-#[allow(dead_code)]
 fn utf8z(p: *const i8) -> String {
   if p.is_null() {
     return String::new();
@@ -134,7 +162,6 @@ fn utf8z(p: *const i8) -> String {
     .into_owned()
 }
 
-#[allow(dead_code)]
 fn utf16(p: *const u16) -> String {
   if p.is_null() {
     return String::new();

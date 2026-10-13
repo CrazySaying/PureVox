@@ -88,6 +88,20 @@ pub struct AppSettings {
   /// 启动时自动运行引擎并隐藏窗口（收到托盘）
   #[serde(default)]
   pub start_hidden: bool,
+  /// 网络服务监听端口（**固定但可编辑**，DESIGN.md §4.1.1）。默认 `proto::PORT`。
+  /// 改了要重启服务才生效（监听端口变了必须重绑）。
+  #[serde(default = "d_net_port")]
+  pub net_port: u16,
+  /// 网络服务对外广告用的网卡地址（空 = 自动用默认路由那张）。
+  ///
+  /// **为什么不直接记网卡名**：DHCP 换地址后名字还在、地址没了，记地址反而会指到一个
+  /// 已经不属于本机的 IP 上。所以记的是**地址本身**，取不到就回落自动（见 `addrs.rs`）。
+  #[serde(default)]
+  pub net_ip: String,
+}
+
+fn d_net_port() -> u16 {
+  crate::net::proto::PORT
 }
 
 fn d_lang() -> String {
@@ -113,6 +127,8 @@ impl Default for AppSettings {
       cue_start: d_cue(),
       cue_stop: d_cue(),
       start_hidden: false,
+      net_port: d_net_port(),
+      net_ip: String::new(),
     }
   }
 }

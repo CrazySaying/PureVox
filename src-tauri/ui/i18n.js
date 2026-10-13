@@ -160,11 +160,23 @@
     '启动中': 'Starting',
     '停止中': 'Stopping',
     '重启中': 'Restarting',
-    '重开监听并重新绑定端口（改端口后用这个生效）':
+    '启动局域网服务，客户端才能连进来': 'Start the LAN service so clients can connect',
+    '停止服务并断开所有客户端（远程输入同时强制关闭）':
+      'Stop the service and disconnect every client (remote input is forced off as well)',
+    '重开监听并重新绑定端口（换端口后用这个生效）':
       'Reopen the listener and rebind the port (use after changing the port)',
     '网络服务：': 'Network service: ',
     '网络服务失败：': 'Network service failed: ',
     '客户端地址': 'Client address',
+    '取不到本机地址': 'Cannot determine this machine\'s address',
+    '网卡': 'Network interface',
+    '端口': 'Port',
+    '自动（默认路由）': 'Automatic (default route)',
+    '没有可直连局域网的网卡': 'No interface that can reach the LAN',
+    '只决定二维码 / 复制的是哪个地址，服务不用重启（本来就在监听所有网卡）':
+      'Only decides which address the QR code and the copy button use. The service keeps running — it already listens on every interface.',
+    '改完自动重启服务；已连着的客户端需要重新连':
+      'Changing it restarts the service; connected clients have to reconnect',
     '复制': 'Copy',
     '复制失败：': 'Copy failed: ',
     '已复制': 'Copied',

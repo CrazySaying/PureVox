@@ -24,7 +24,6 @@ use std::net::{Ipv4Addr, UdpSocket};
 use super::NetIface;
 
 /// 默认路由那张网卡：UDP 连一个公网地址，取本地地址 —— 不发包也不需要真的连上。
-#[allow(dead_code)]
 fn default_ip_via_udp() -> String {
   for target in ["8.8.8.8:80", "1.1.1.1:80"] {
     if let Ok(s) = UdpSocket::bind("0.0.0.0:0")
@@ -37,7 +36,6 @@ fn default_ip_via_udp() -> String {
   String::new()
 }
 
-#[allow(dead_code)]
 pub fn enumerate() -> Vec<NetIface> {
   let dflt = default_ip_via_udp();
   let mut out = Vec::new();

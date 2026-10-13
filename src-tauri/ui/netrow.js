@@ -42,8 +42,19 @@
     return window.__TAURI__.core.invoke(cmd, args)
   }
 
-  /** 当前地址（`ws://ip:port`），失败给原因。同一份数据给顶栏面板与这里的二维码。 */
+  /** 当前地址（`http://ip:port/`），失败给原因。同一份数据给顶栏面板与这里的二维码。 */
   let addrUrl = ''
+  /** 当前对外广告的 IP（子网下拉要选中它） */
+  let addrIp = ''
+  /** 服务端口（端口框要显示它） */
+  let addrPort = 59123
+  /** 可选网卡列表（子网下拉的选项）。`[]` = 不支持枚举或一张都没有。 */
+  /** @type {{ip: string, name: string, desc: string, is_default: boolean}[]} */
+  let ifaces = []
+  /** 服务是否在跑。**别去 `net_status` 的中文串里匹配** —— 那串会改文案。 */
+  let running = false
+  /** 取不到地址的原因（没网卡 / 没默认路由）。空 = 取到了。 */
+  let addrReason = ''
   /** @type {{text: string, ok: boolean}|null} */
   let lastStatus = null
   let remoteInput = false
@@ -54,23 +65,33 @@
   let timer = null
 
   /**
-   * 拉一次状态 + 地址，刷新所有已挂载的网络行卡片。
+   * 拉一次状态 + 地址 + 网卡，刷新所有已挂载的网络行卡片。
    * @returns {Promise<void>}
    */
   async function poll() {
     let ok = false
     let text = ''
     try {
-      const [s, a] = await Promise.all([
+      const [s, a, run, ifs] = await Promise.all([
         invoke('net_status'),
         invoke('net_local_addr'),
+        invoke('net_running'),
+        invoke('net_ifaces'),
       ])
       ok = true
       text = String(s)
       addrUrl = a && a.url ? String(a.url) : ''
+      addrIp = a && a.ip ? String(a.ip) : ''
+      addrReason = a && a.reason ? String(a.reason) : ''
+      if (a && a.port) addrPort = Number(a.port)
+      running = !!run
+      if (Array.isArray(ifs)) ifaces = ifs
     } catch (e) {
       text = T('状态不可用：') + String(e)
       addrUrl = ''
+      addrIp = ''
+      addrReason = String(e)
+      running = false
     }
     lastStatus = { text, ok }
     for (const c of cards) {
@@ -130,14 +151,19 @@
     const canvas = /** @type {HTMLCanvasElement|null} */ (host.querySelector('canvas'))
     const note = /** @type {HTMLElement|null} */ (host.querySelector('.netqr-note'))
     if (!canvas || !window.__pvQr) return
-    if (!url) {
-      // 服务没起来 → 地址拿不到。与其画一张扫不通的码，不如说清楚为什么没码。
+    // 服务没跑就不给码：地址是能算出来的，但扫过去连不上。与其给一张必然失败的码，不如
+    // 说清楚为什么没码（AGENTS.md §1.1：不显示伪造 / 无效的值）。
+    if (!url || !running) {
       const ctx = canvas.getContext('2d')
       if (ctx) {
         ctx.clearRect(0, 0, canvas.width, canvas.height)
       }
       canvas.classList.add('off')
-      if (note) note.textContent = T('服务未启动，没有可扫的地址')
+      if (note) {
+        note.textContent = url
+          ? T('服务未启动，没有可扫的地址')
+          : addrReason || T('取不到本机地址')
+      }
       return
     }
     canvas.classList.remove('off')
@@ -223,7 +249,11 @@
       acts.appendChild(b)
       return b
     }
-    mk(T('重启服务'), 'net_restart', T('重启中'), T('重开监听并重新绑定端口（改端口后用这个生效）'), true)
+    // 三个生命周期按钮。**不做「隐藏」，只做「禁用」** —— 禁用时按钮还在原位，卡片
+    // 不会因为服务起停而重排，界面不跳（AGENTS.md §1.1 的固定行数刷新同理）。
+    const bStart = mk(T('启动'), 'net_start', T('启动中'), T('启动局域网服务，客户端才能连进来'))
+    const bStop = mk(T('停止'), 'net_stop', T('停止中'), T('停止服务并断开所有客户端（远程输入同时强制关闭）'))
+    mk(T('重启服务'), 'net_restart', T('重启中'), T('重开监听并重新绑定端口（换端口后用这个生效）'), true)
     bar.appendChild(acts)
     box.appendChild(bar)
 
@@ -243,6 +273,100 @@
     copyBtn.addEventListener('click', () => copy(addrUrl, copyBtn))
     addrBox.append(lab, url, copyBtn)
     box.appendChild(addrBox)
+
+    // 2b) 网卡下拉 + 端口框。**换网卡不用重启服务**（服务绑 0.0.0.0，本来就监听所有
+    //     网卡），换端口必须重启 —— 所以这两件事的行为不一样，提示文字也分开写。
+    const netBox = document.createElement('div')
+    netBox.className = 'netcard-addr'
+    netBox.appendChild(nl(T('网卡')))
+    const ifSel = document.createElement('select')
+    ifSel.className = 'netcard-sel netcard-ifsel'
+    ifSel.title = T('只决定二维码 / 复制的是哪个地址，服务不用重启（本来就在监听所有网卡）')
+    ifSel.addEventListener('change', () => {
+      const v = ifSel.value
+      invoke('net_select_ip', { ip: v })
+        .then((r) => {
+          addrIp = v
+          if (window.__pvDebug) window.__pvDebug(String(r))
+        })
+        .catch((e) => {
+          if (window.__pvDebug) window.__pvDebug(T('切换网卡失败：') + String(e))
+        })
+        .finally(() => {
+          poll()
+        })
+    })
+    netBox.appendChild(ifSel)
+    netBox.appendChild(nl(T('端口')))
+    const portIn = document.createElement('input')
+    portIn.type = 'number'
+    portIn.min = '1024'
+    portIn.max = '65535'
+    portIn.step = '1'
+    portIn.className = 'netcard-port mono'
+    portIn.title = T('改完自动重启服务；已连着的客户端需要重新连')
+    portIn.addEventListener('change', () => {
+      const p = Number(portIn.value)
+      if (!Number.isInteger(p) || p < 1024 || p > 65535) {
+        portIn.value = String(addrPort) // 非法值回滚，别留个填不回去的框
+        if (window.__pvDebug) window.__pvDebug(T('端口要在 1024~65535 之间'))
+        return
+      }
+      portIn.disabled = true
+      invoke('net_set_port', { port: p })
+        .then((r) => {
+          addrPort = p
+          if (window.__pvDebug) window.__pvDebug(String(r))
+        })
+        .catch((e) => {
+          portIn.value = String(addrPort)
+          if (window.__pvDebug) window.__pvDebug(T('改端口失败：') + String(e))
+        })
+        .finally(() => {
+          portIn.disabled = false
+          poll()
+        })
+    })
+    netBox.appendChild(portIn)
+    box.appendChild(netBox)
+
+    /**
+     * 重建网卡下拉的选项。
+     *
+     * **重建而不是增量改**：网卡随时会插拔（USB 共享、蓝牙共享、移动热点），两秒前还在
+     * 的那张下一轮可能就没了，增量维护要处理一堆「上一轮有这一轮没有」的边界。整份重建
+     * 只有五行，而且选项数是个位数，重建的成本可以忽略。
+     */
+    const fillIfaces = () => {
+      // 每 500 ms 重建一次会把用户正打开的下拉弹回去。签名相同就直接跳过 —— 选项内容
+      // 和选中项都没变，重建纯属自找麻烦。
+      const sig = addrIp + ' ' + ifaces.map((n) => n.ip + ' ' + n.name + ' ' + n.desc).join('')
+      if (ifSel.dataset.sig === sig) return
+      ifSel.dataset.sig = sig
+      ifSel.textContent = ''
+      // 自动项永远在：用户选的那张可能已经拔了（`advertised_ip()` 已经回落到默认路由），
+      // 这时得有个地方能一键回到自动
+      const auto = document.createElement('option')
+      auto.value = ''
+      auto.textContent = T('自动（默认路由）')
+      ifSel.appendChild(auto)
+      for (const n of ifaces) {
+        const o = document.createElement('option')
+        o.value = n.ip
+        // 名字带网卡全名，用户才认得出「这张是 USB 共享还是 Wi-Fi」
+        const tag = n.desc && n.desc !== n.name ? n.name + ' · ' + n.desc : n.name
+        o.textContent = n.ip + (tag ? '  ' + tag : '')
+        ifSel.appendChild(o)
+      }
+      if (!ifaces.length) {
+        const o = document.createElement('option')
+        o.value = ''
+        o.disabled = true
+        o.textContent = T('没有可直连局域网的网卡')
+        ifSel.appendChild(o)
+      }
+      ifSel.value = addrIp
+    }
 
     // 3) 二维码在左，**说明文字在二维码右边**（一栏竖排，不散在卡片各处）。
     //    下面再放远程输入开关——高度由内容决定，不留空白。
@@ -288,10 +412,23 @@
       const s = lastStatus
       if (s) {
         status.textContent = s.text
-        dot.className = 'netdot ' + (s.ok ? 'ok' : 'na')
+        // 灯也看服务在不在跑：服务停了但状态查询成功时，不能还是绿的
+        dot.className = 'netdot ' + (s.ok && running ? 'ok' : 'na')
       }
-      url.textContent = addrUrl || T('服务未启动')
-      url.className = 'mono netcard-url ' + (addrUrl ? '' : 'na')
+      // 启停按钮按状态禁用（不隐藏，避免卡片重排）
+      bStart.disabled = running
+      bStop.disabled = !running
+      // 地址取不到时要说**为什么**：没网卡 / 没有默认路由，和「服务没跑」是两回事，都写
+      // 成「服务没启动」会让人一直去点启动按钮（AGENTS.md §1.1）。
+      // 地址取得到时照常显示（服务没跑就是灰的），用户据此在手机上先填好 —— 只是别给一张
+      // 扫不通的码，见 `drawQr`。
+      url.textContent = addrUrl || addrReason || T('服务未启动')
+      url.className = 'mono netcard-url ' + (addrUrl && running ? '' : 'na')
+      fillIfaces()
+      // 端口框只在**用户没在改它**时同步，否则正在输入的字符会被每 500 ms 的轮询吃掉
+      if (document.activeElement !== portIn && portIn.value !== String(addrPort)) {
+        portIn.value = String(addrPort)
+      }
       drawQr(qrBox)
     }
 

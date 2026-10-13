@@ -22,7 +22,6 @@
 
 use super::NetIface;
 
-#[allow(dead_code)]
 pub fn enumerate() -> Vec<NetIface> {
   Vec::new()
 }

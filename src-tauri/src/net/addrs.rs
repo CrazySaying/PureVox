@@ -34,7 +34,6 @@
 //! Unix 用已在树里的 `libc::getifaddrs`。
 
 /// 一张网卡的一个 IPv4 地址。
-#[allow(dead_code)] // 接线在 main.rs 的 `net_ifaces` 命令（界面上的子网下拉）
 #[derive(Clone, serde::Serialize)]
 pub struct NetIface {
   /// 点分十进制地址，如 `192.168.1.5`
@@ -60,7 +59,6 @@ mod platform;
 mod platform;
 
 /// 列出可直连的网卡：默认路由那张排第一，其余按 IP 排序（稳定，便于界面记住选择）。
-#[allow(dead_code)] // 同上
 pub fn list() -> Vec<NetIface> {
   let mut v = platform::enumerate();
   v.sort_by(|a, b| match (a.is_default, b.is_default) {
@@ -71,8 +69,7 @@ pub fn list() -> Vec<NetIface> {
   v
 }
 
-/// 默认路由那张的地址（`net_local_addr` 不带参数时用它，保持旧行为）。
-#[allow(dead_code)] // 同上
+/// 默认路由那张的地址（没选过、或选的那张已经不属于本机时用它）。
 pub fn default_ip() -> String {
   list()
     .into_iter()
