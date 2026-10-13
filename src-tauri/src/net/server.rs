@@ -54,7 +54,10 @@ pub fn router(hub: Arc<NetHub>, ca_pem: String) -> Router {
     .route("/health", get(health))
     .route("/ca-cert", get(move || ca_cert_download(ca_pem.clone())))
     .route("/libopus-wasm.js", get(libopus_wasm_js))
-    .route("/generated/libopus.generated.mjs", get(libopus_wasm_generated))
+    .route(
+      "/generated/libopus.generated.mjs",
+      get(libopus_wasm_generated),
+    )
     .route("/report-caps", get(report_caps))
     .with_state(hub)
 }
@@ -94,12 +97,18 @@ fn wasm_asset(body: &'static [u8]) -> impl IntoResponse {
   let etag = format!("\"{}\"", body.len());
   (
     [
-      (CONTENT_TYPE, HeaderValue::from_static("text/javascript; charset=utf-8")),
+      (
+        CONTENT_TYPE,
+        HeaderValue::from_static("text/javascript; charset=utf-8"),
+      ),
       (
         CACHE_CONTROL,
         HeaderValue::from_static("public, max-age=0, must-revalidate"),
       ),
-      (ETAG, HeaderValue::from_str(&etag).unwrap_or_else(|_| HeaderValue::from_static("\"0\""))),
+      (
+        ETAG,
+        HeaderValue::from_str(&etag).unwrap_or_else(|_| HeaderValue::from_static("\"0\"")),
+      ),
     ],
     body,
   )
@@ -177,10 +186,7 @@ async fn web_page() -> impl IntoResponse {
       ),
       // 页面**不许缓存**（它内嵌内容，改了要立刻生效）；而 `/libopus-wasm.js` 那些产物
       // 相反，要长缓存——见 `wasm_asset` 的注释
-      (
-        CACHE_CONTROL,
-        HeaderValue::from_static("no-store"),
-      ),
+      (CACHE_CONTROL, HeaderValue::from_static("no-store")),
     ],
     super::webclient::PAGE,
   )

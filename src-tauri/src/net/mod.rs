@@ -29,6 +29,7 @@ pub mod addrs;
 pub mod hub;
 pub mod keymap;
 pub mod keys;
+pub mod mdns;
 pub mod opus_sys;
 
 /// 网络回环测试（只 `cfg(test)` 编译，不进产物）。
@@ -91,6 +92,12 @@ pub fn start() -> Result<String, String> {
       Ok(listener) => {
         hh.set_running(true);
         hh.set_ca_pem(ca_pem);
+        // 广告跟着服务起停：服务没开就搜不到，这是**预期行为**（界面要写明），
+        // 总比「搜到了却连不上」好排查
+        match mdns::advertise(&ips, port) {
+          Ok(m) => hh.set_last_error(m),
+          Err(e) => hh.set_last_error(format!("mDNS 广播失败：{e}")),
+        }
         loop {
           // 单次 accept 失败（连接被 RST、fd 紧张）不该拖垮整个服务
           let Ok((tcp, _peer)) = listener.accept().await else {
@@ -158,6 +165,8 @@ pub fn stop() {
   let h = hub();
   h.set_remote_input(false);
   h.set_running(false);
+  // 广告必须跟着停：常驻广播会让「明明没跑服务却搜得到」，连过去必然失败，比搜不到更难排查
+  mdns::unregister();
   // 锁中毒时不能 panic：停服务是在退出路径上调用的，宁可漏停也不能崩。
   if let Ok(mut slot) = TASK.lock()
     && let Some(handle) = slot.take()

@@ -87,6 +87,7 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pemfile = { version = "2", default-features = false, features = ["std"] }
 hyper-util = { version = "0.1", features = ["server-auto", "http1", "http2", "tokio"] }
+mdns-sd = "0.21"
 
 [target.'cfg(windows)'.dependencies]
 # 调试接口：GPU 占用 / 显存（DXGI + PDH）、进程私有字节
