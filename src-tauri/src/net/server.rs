@@ -47,12 +47,109 @@ const TX_BITRATE: i32 = 32_000;
 const IDLE_TIMEOUT: u64 = 60;
 
 /// 路由表（跨平台）。`Arc<NetHub>` 作为 axum 状态。
-pub fn router(hub: Arc<NetHub>) -> Router {
+pub fn router(hub: Arc<NetHub>, ca_pem: String) -> Router {
   Router::new()
     .route("/", get(web_page))
     .route("/ws", get(ws_entry))
     .route("/health", get(health))
+    .route("/ca-cert", get(move || ca_cert_download(ca_pem.clone())))
+    .route("/libopus-wasm.js", get(libopus_wasm_js))
+    .route("/generated/libopus.generated.mjs", get(libopus_wasm_generated))
+    .route("/report-caps", get(report_caps))
     .with_state(hub)
+}
+
+/// 浏览器端的 Opus **编解码器**（`libopus-wasm`，MIT，见 `LICENSE-THIRD-PARTY.txt`）。
+///
+/// **为什么不用浏览器内置的 WebCodecs**：`AudioEncoder` / `AudioDecoder` 只有 Chrome 94+ /
+/// Safari 16.4+ 才有，实测有浏览器根本没有，于是麦克风与扬声器一起不可用。而 wasm 只要有
+/// `WebAssembly`（所有现代浏览器）就能跑，**编解码还都在客户端、帧长按我们的 10 ms hop
+/// 配置**，服务端 `opus.dll` 只管解码，两边对得上。
+///
+/// wasm 以 base64 内嵌在这个 `.mjs` 里（编译期产物），所以**只有一次 JS 请求**，没有第二个
+/// `.wasm` 请求。路径必须是 `/generated/libopus.generated.mjs` —— `libopus-wasm.js` 内部写死
+/// 了相对路径 `./generated/libopus.generated.mjs`，改路由就得同步改第三方产物，不如不动它。
+const LIBOPUS_JS: &[u8] = include_bytes!("wasm/libopus-wasm.js");
+const LIBOPUS_GENERATED: &[u8] = include_bytes!("wasm/generated/libopus.generated.mjs");
+
+async fn libopus_wasm_js() -> impl IntoResponse {
+  (
+    [(
+      axum::http::header::CONTENT_TYPE,
+      axum::http::HeaderValue::from_static("text/javascript; charset=utf-8"),
+    )],
+    LIBOPUS_JS,
+  )
+}
+
+async fn libopus_wasm_generated() -> impl IntoResponse {
+  (
+    [(
+      axum::http::header::CONTENT_TYPE,
+      axum::http::HeaderValue::from_static("text/javascript; charset=utf-8"),
+    )],
+    LIBOPUS_GENERATED,
+  )
+}
+
+/// 客户端能力上报。
+///
+/// 网页版浏览器缺什么只有它自己知道，而「麦克风用不了」有好几种完全不同的原因（不是安全
+/// 上下文 / 没有 `AudioEncoder` / 浏览器不支持 Opus 编码 / 权限被拒），从服务端看一律表现
+/// 为「没声音」，只能靠猜浏览器版本来分辨。让它自己报上来，`/debug` 的 `net` 段直接能读，
+/// 这也正是 AGENTS.md §1「调试优先」要的东西：不要让人猜为什么用不了。
+async fn report_caps(
+  axum::extract::State(hub): axum::extract::State<Arc<NetHub>>,
+  axum::extract::Query(q): axum::extract::Query<ClientCaps>,
+) -> impl IntoResponse {
+  let line = format!(
+    "浏览器={}｜安全上下文={}｜采集={}｜编码器={}｜解码器={}｜Opus编码={}｜原因={}",
+    q.ua, q.secure, q.mic, q.enc, q.dec, q.opus, q.why
+  );
+  hub.set_client_caps(line);
+  axum::http::StatusCode::NO_CONTENT
+}
+
+/// 客户端能力上报的查询参（全用字符串，省一套自定义反序列化）。
+#[derive(serde::Deserialize)]
+struct ClientCaps {
+  #[serde(default)]
+  ua: String,
+  #[serde(default)]
+  secure: String,
+  #[serde(default)]
+  mic: String,
+  #[serde(default)]
+  enc: String,
+  #[serde(default)]
+  dec: String,
+  #[serde(default)]
+  opus: String,
+  #[serde(default)]
+  why: String,
+}
+
+/// CA 证书下载：手机装一次它，就再也不会看到「不安全」警告，也就**永久拿到安全上下文**
+/// （`getUserMedia` 的前提）。
+///
+/// 为什么必须走 HTTPS 才能装：浏览器只在安全上下文里允许下载并保留用户证书——用
+/// `http://` 连过来这一页本身就拿不到麦克风，正好是要修的问题。（另有一条命令行的路子，
+/// 见 README；这里是给不方便用 adb 的人。）
+async fn ca_cert_download(ca_pem: String) -> impl IntoResponse {
+  use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE, HeaderValue};
+  (
+    [
+      (
+        CONTENT_TYPE,
+        HeaderValue::from_static("application/x-x509-ca-cert"),
+      ),
+      (
+        CONTENT_DISPOSITION,
+        HeaderValue::from_static("attachment; filename=\"purevox-ca.crt\""),
+      ),
+    ],
+    ca_pem,
+  )
 }
 
 /// WebSocket 升级入口。
@@ -349,6 +446,7 @@ mod tests {
   /// 路由表必须能构造（axum 内部校验路由不冲突）。
   #[test]
   fn router_builds() {
-    let _ = router(Arc::new(NetHub::new()));
+    // CA PEM 只是被 `/ca-cert` 的闭包捕获，构造路由时不解析它，所以这里给空串即可
+    let _ = router(Arc::new(NetHub::new()), String::new());
   }
 }

@@ -58,6 +58,7 @@ pub enum ServerMsg {
   #[serde(rename = "ready")]
   Ready {
     proto: i32,
+    /// 服务端往客户端发的音频格式。客户端按这个来准备解码 / 播放。
     codec: &'static str,
     rate: u32,
     channels: u32,

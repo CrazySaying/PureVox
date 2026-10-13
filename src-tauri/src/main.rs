@@ -360,7 +360,16 @@ fn net_set_remote_input(on: bool) -> Result<String, String> {
   })
 }
 
-/// 网络行卡片展示用：本机在局域网的 IP 与**网页版客户端地址**（`http://<ip>:<port>/`）。
+/// 本机 CA 证书 PEM（界面「下载证书」按钮 / 调试接口用）。
+///
+/// 服务没启动时是 `None`：那时证书还没准备好，界面该说「先启动服务」，而不是给一个点
+/// 下去下载到空文件的按钮。
+#[tauri::command]
+fn net_ca_pem() -> Option<String> {
+  net::hub().ca_pem()
+}
+
+/// 网络行卡片展示用：本机在局域网的 IP 与**网页版客户端地址**（`https://<ip>:<port>/`）。
 ///
 /// IP 用 `net::advertised_ip()`：卡片上选的那张，没有（或已经失效）就用默认路由那张。
 /// 端口用 `net::hub().port()`：用户改过的那个，不是写死的 59123。
@@ -388,10 +397,13 @@ fn net_local_addr() -> NetLocalAddr {
     return fail("取本机地址失败：本机没有可直连局域网的网卡（Wi-Fi / 有线都没连？）".into());
   }
   NetLocalAddr {
-    // 给人看的地址是 **http://**，不是 ws:// —— `ws://` 只在扫码后的网页版
-    // 客户端内部用（它自己拼 `/ws`）。二维码指向 ws:// 的话手机会当普通文本，
-    // 扫码后什么也不会发生。
-    url: format!("http://{ip}:{port}/"),
+    // 给人看的地址是 **https://**：网页版客户端的麦克风靠 `getUserMedia`，而它**只在安全
+    // 上下文里可用** —— `http://192.168.x.x` 不是安全上下文，浏览器会直接拒绝麦克风请求，
+    // 而且没有任何绕过办法。所以必须是 https（自签证书，见 `net::tls`）。
+    //
+    // 不是 `ws://`：`ws://` 只在网页版客户端内部用（它自己拼 `/ws`）。二维码指向 ws://
+    // 的话手机会当普通文本，扫码后什么也不会发生。
+    url: format!("https://{ip}:{port}/"),
     ip,
     port,
     reason: String::new(),
@@ -580,6 +592,16 @@ fn main() {
       // 读回上次选定的网络端口 / 广告地址。不读的话用户填的端口每次启动都白填
       // （hub 默认 59123），必须在第一次 `net_start` 之前。
       net::load_settings();
+      // 调试钩子（不设环境变量则完全不生效）：`PUREVOX_AUTONET=1` 时自动启动网络服务。
+      // 服务启动只发生在界面点「启动」之后，无人值守的验证（脚本 / CI / 回归排查）
+      // 就没法确认它到底起没起 —— 加了这个钩子就能纯靠 `/debug` 的 `net` 段判断。
+      if std::env::var("PUREVOX_AUTONET").is_ok() {
+        let hub = app.state::<SharedHub>().inner().clone();
+        match net::start() {
+          Ok(m) => hub.push_ui("info", format!("AUTONET 启动网络服务：{m}")),
+          Err(e) => hub.push_ui("error", format!("AUTONET 启动网络服务失败：{e}")),
+        }
+      }
       start_hotkey(app.handle(), &app.state::<HotkeyHost>());
       // 初始状态同步窗口图标
       sync_tray(app.handle(), app.state::<Arc<AudioManager>>().is_running());
@@ -658,6 +680,7 @@ fn main() {
       net_running,
       net_set_remote_input,
       net_local_addr,
+      net_ca_pem,
       net_ifaces,
       net_select_ip,
       net_set_port,

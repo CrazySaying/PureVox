@@ -38,7 +38,7 @@ mod inner {
   /// 起一个真实监听的服务（绑 127.0.0.1 随机端口，避免占用 59123）。
   async fn serve() -> SocketAddr {
     let hub = Arc::new(NetHub::new());
-    let app = router(hub);
+    let app = router(hub, String::new());
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("绑定");
     let addr = listener.local_addr().expect("本地地址");
     tokio::spawn(async move {
@@ -320,7 +320,7 @@ mod inner {
   async fn enabled_remote_input_accepts_keys() {
     let hub = Arc::new(NetHub::new());
     hub.set_remote_input(true);
-    let app = router(hub.clone());
+    let app = router(hub.clone(), String::new());
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("绑定");
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {

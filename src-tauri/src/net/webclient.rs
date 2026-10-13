@@ -89,6 +89,7 @@ input[type=text]{font:inherit;width:100%;color:var(--fg);background:#18202a;bord
   <button id="bKb" style="flex:1">键盘 / 打字</button>
 </div>
 <div class="note" id="hint"></div>
+<div class="note" id="caps"></div>
 
 <input type="text" id="text" placeholder="在此打字，发到电脑…" autocomplete="off" enterkeyhint="send">
 <div class="note">用系统的「全键盘」发送按键可能比这排虚拟键好用；两���可以并用。</div>
@@ -109,7 +110,24 @@ const hint = document.getElementById('hint');
 document.getElementById('pc').textContent = location.host;
 
 let ws = null, micOn = false, spkOn = false;
+/** 自动申请麦克风只试一次：用户拒了之后不该在每次重连时反复弹框骚扰。 */
+let micAsked = false;
 let enc = null, dec = null, actx = null, micNode = null, spkGain = null;
+
+// ---- Opus 编解码器：wasm（`libopus-wasm`，MIT），不依赖浏览器内置的 WebCodecs ----
+// 帧长按引擎的 10 ms hop 配（480 样本 @ 48 kHz 单声道），和服务端队列同格式，
+// 采集 / 解码出来的都是 Float32，一个转换都不用做。
+// `signal` 必须传 `Signal.Voice` 那个**常量**（3001），传字符串 'voice' 会被
+// libopus-wasm 判为非法值而抛 `RangeError`——编解码器初始化失败，表现为「点了没反应」。
+let codecReady = false;
+async function loadCodecs() {
+  const m = await import('/libopus-wasm.js');
+  enc = await m.createEncoder({
+    channels: 1, frameSize: HOP, bitrate: 32000, signal: m.Signal.Voice,
+  });
+  dec = await m.createDecoder({ channels: 1 });
+  codecReady = true;
+}
 let txQueue = [], playAt = 0, frameMs = 10, ready = false;
 
 function say(t, cls) { st.textContent = t; dot.className = 'dot ' + (cls || ''); }
@@ -135,6 +153,12 @@ function connect() {
       if (m.t === 'ready') {
         ready = true; frameMs = m.frame_ms || 10;
         say('已连接 · ' + m.rate + ' Hz · ' + m.frame_ms + ' ms/帧', 'on');
+        // **连上就自动申请麦克风**（用户扫码进来的意图就是要用麦克风，不该再点一次按钮）。
+        // 浏览器会弹权限框；被拒也不影响打字 / 键盘 / 扬声器，那些照常可用。
+        if (!micOn && !micAsked) {
+          micAsked = true;
+          autoMic().catch(() => {});
+        }
         if (micOn && !enc) startMic();
         if (spkOn && !dec) startSpk();
       } else if (m.t === 'pong') {
@@ -147,8 +171,7 @@ function connect() {
       return;
     }
     const b = new Uint8Array(ev.data);                   // 二进制 = Opus 包
-    if (spkOn && dec && ready && b.length) dec.decode(new EncodedAudioChunk({
-      type: 'key', timestamp: Math.round(playAt * 1e6), data: b }));
+    if (spkOn && dec && ready && b.length) playPacket(b);
   };
   // RTT：每 5 秒 ping 一次，服务端原样回 pong；时差自己算好再用 rtt 上报
   // （proto.rs 的约定：客户端测、服务端不计时，这样 /debug 里能直接看到）
@@ -177,11 +200,44 @@ function worklet() {
   return workletUrl;
 }
 
+/** 麦克风在**拿到权限之前**就注定拿不到的原因（空串 = 可以试）。 */
+function micBlockReason() {
+  // `getUserMedia` 只在安全上下文里可用。`http://192.168.x.x` 不是安全上下文，浏览器
+  // 直接拒绝，**没有任何绕过办法** —— 所以二维码必须指向 https（DESIGN.md §4.1.1）。
+  if (!window.isSecureContext)
+    return '当前页面不是安全上下文，浏览器禁止使用麦克风。必须用 https:// 打开' +
+           '（用 http:// 时无论怎么点都没用；电脑上启动服务后扫码即可）';
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia)
+    return '这个浏览器不支持麦克风采集（需要 https 与较新的浏览器）';
+  return '';
+}
+
 async function startMic() {
-  const t = actx ? '已有' : '申请';
-  say('麦克风' + t + '权限…', 'warn');
-  const stream = await navigator.mediaDevices.getUserMedia({
-    audio: { channelCount: 1, sampleRate: SR, echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+  // **先说清为什么拿不到**，不然只看到「麦克风打不开」根本不知道该做什么。这几种原因
+  // 对应的动作完全不同：非安全上下文要换 https 打开；权限被拒要去地址栏改网站设置；
+  // 没有麦克风是设备问题。
+  const blocked = micBlockReason();
+  if (blocked) { say(blocked, 'err'); throw new Error(blocked); }
+  if (!codecReady) throw new Error('Opus 编解码器还没准备好');
+  say('申请麦克风权限…', 'warn');
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, sampleRate: SR, echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+  } catch (e) {
+    let msg;
+    if (e && e.name === 'NotAllowedError') {
+      msg = window.isSecureContext
+        ? '麦克风权限被拒绝：点地址栏左边的图标 → 网站设置 → 麦克风改成「允许」'
+        : '麦克风被拒绝：页面不是安全上下文，必须用 https:// 打开';
+    } else if (e && e.name === 'NotFoundError') {
+      msg = '这台设备上没有找到麦克风';
+    } else {
+      msg = '麦克风打不开：' + (e && e.message ? e.message : String(e));
+    }
+    say(msg, 'err');
+    throw e;
+  }
   if (!actx) actx = new AudioContext({ sampleRate: SR });
   if (actx.state === 'suspended') await actx.resume();
   await actx.audioWorklet.addModule(worklet());
@@ -190,44 +246,40 @@ async function startMic() {
     if (!enc) return;
     // 每 hop 一帧 Opus（10 ms）。服务端按 hop 重切，不依赖帧长。
     const f = new Float32Array(e.data);
-    enc.encode(new AudioData({
-      format: 'f32-planar', sampleRate: SR, numberOfFrames: f.length,
-      numberOfChannels: 1, timestamp: 0, data: f }));
+    try {
+      // 直接编码成裸 Opus 包：**不需要浏览器内置的编解码器**（WebCodecs 只有 Chrome 94+ /
+      // Safari 16.4+ 才有，实测有浏览器根本没有，麦克风与扬声器一起不可用）。
+      sendBin(enc.encodeFloat(f).buffer);
+    } catch (e) { say('Opus 编码失败：' + (e && e.message ? e.message : e), 'err'); }
   };
   const src = actx.createMediaStreamSource(stream);
   src.connect(micNode);
-  enc = new AudioEncoder({
-    output: (c) => { const b = new Uint8Array(c.byteLength); c.copyTo(b); sendBin(b.buffer); },
-    error: (err) => say('Opus 编码失败：' + err.message, 'err') });
-  enc.configure({ codec: 'opus', sampleRate: SR, numberOfChannels: 1, bitrate: 32000 });
 }
 
-// ---- 扬声器下行：WebCodecs Opus → AudioWorklet 排队播放 ----
+// ---- 扬声器下行：wasm 解码 Opus → 按 ctx.currentTime 排队播放 ----
 let spkNode = null;
 async function startSpk() {
   if (!actx) actx = new AudioContext({ sampleRate: SR });
   if (actx.state === 'suspended') await actx.resume();
-  await actx.audioWorklet.addModule(worklet());
-  // 输出侧用零输入的 worklet 不行（会一直 produce），改用脚本节点式回环：
-  // 直接把解码后的 Float32 挂到 destination，按 ctx.currentTime 排。
   spkGain = actx.createGain(); spkGain.gain.value = 1; spkGain.connect(actx.destination);
-  dec = new AudioDecoder({
-    output: (a) => {
-      const n = a.numberOfFrames;
-      const buf = new Float32Array(n);
-      a.copyTo(buf, { planeIndex: 0 });
-      const at = Math.max(playAt, actx.currentTime + 0.02);
-      playAt = at + n / SR;
-      const src2 = actx.createBufferSource();
-      const ab = actx.createBuffer(1, n, SR);
-      ab.copyToChannel(buf, 0);
-      src2.buffer = ab; src2.connect(spkGain); src2.start(at);
-    },
-    error: (err) => say('Opus 解码失败：' + err.message, 'err') });
-  dec.configure({ codec: 'opus', sampleRate: SR, numberOfChannels: 1 });
   // 订阅电脑音频：proto.rs 里 `Sub` 是**无负载**的单位变体，只能发 {"t":"sub"}，
   // 带任何额外字段服务端都解析不出来。
   send({ t: 'sub' });
+}
+
+/** 一个收到的 Opus 包 → 解码 → 排队播放。解出来是 0 帧说明这包丢了（in-band FEC 失败）。 */
+function playPacket(bytes) {
+  let pcm;
+  try { pcm = dec.decodeFloat(bytes, { frameSize: HOP }); }
+  catch (e) { say('Opus 解码失败：' + (e && e.message ? e.message : e), 'err'); return; }
+  if (!pcm || !pcm.length) return;
+  const n = pcm.length;
+  const at = Math.max(playAt, actx.currentTime + 0.02);
+  playAt = at + n / SR;
+  const src2 = actx.createBufferSource();
+  const ab = actx.createBuffer(1, n, SR);
+  ab.copyToChannel(pcm, 0);
+  src2.buffer = ab; src2.connect(spkGain); src2.start(at);
 }
 
 // ---- UI ----
@@ -240,6 +292,17 @@ bind('bMic', async (b) => {
   if (micOn) { await startMic(); say('麦克风已开', 'on'); }
   else if (micNode) { micNode.disconnect(); micNode = null; say('麦克风已关'); }
 });
+
+/**
+ * 自动开麦：把按钮状态、开关变量一起设好，免得用户看按钮还是「关」而实际已经在推流。
+ * 失败时 `startMic` 已经在状态行说明了原因，这里只负责把界面恢复原状。
+ */
+async function autoMic() {
+  micOn = true;
+  document.getElementById('bMic').setAttribute('aria-pressed', 'true');
+  try { await startMic(); say('麦克风已开（连上就自动申请了权限）', 'on'); }
+  catch (e) { micOn = false; document.getElementById('bMic').setAttribute('aria-pressed', 'false'); }
+}
 bind('bSpk', async (b) => {
   spkOn = !spkOn; b.setAttribute('aria-pressed', String(spkOn));
   if (spkOn) { await startSpk(); }
@@ -296,14 +359,63 @@ LAYOUT.forEach((row, ri) => {
   });
 });
 
-// 没有 WebCodecs 就明说，别让按钮点了没反应（无痕/旧 WebView 常见）
-if (typeof AudioEncoder === 'undefined' || typeof AudioDecoder === 'undefined') {
-  say('此浏览器不支持 WebCodecs（Opus），麦克风/扬声器不可用；打字与键盘仍可用', 'err');
-  document.getElementById('bMic').disabled = true;
-  document.getElementById('bSpk').disabled = true;
-} else {
-  connect();
+// ---- 能力实测：真的把 Opus 编解码器**加载起来**跑一帧，而不是只看 API 在不在 ----
+// 之前只看 `typeof AudioEncoder`，那既会误判（API 存在 ≠ 支持 opus 配置），也漏掉了真正
+// 的限制：WebCodecs 只有 Chrome 94+ / Safari 16.4+ 才有，实测有浏览器根本没有，于是麦克风
+// 与扬声器一起不可用，而从外面看一律只是「没声音」。现在编解码在 wasm 里，只要浏览器有
+// `WebAssembly` 就能跑——所以这里直接加载并编/解一帧验真，比探测任何 API 都可靠。
+const caps = { secure: false, mic: false, opus: false, why: '' };
+
+async function probeCaps() {
+  caps.secure = !!window.isSecureContext;
+  caps.mic = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+  if (!caps.secure) { caps.why = '非安全上下文（必须 https:// 打开）'; return caps; }
+  if (!caps.mic) { caps.why = '没有麦克风采集接口'; return caps; }
+  try {
+    await loadCodecs();
+    // 真编一帧、真解一帧：能闭环才叫「支持」
+    const probe = new Float32Array(HOP);           // 全零的静音帧
+    const packet = enc.encodeFloat(probe);
+    const back = dec.decodeFloat(packet, { frameSize: HOP });
+    caps.opus = !!packet.length && back.length === HOP;
+    if (!caps.opus) caps.why = 'Opus 编解码器初始化后编解码结果不对';
+  } catch (e) {
+    caps.opus = false;
+    caps.why = 'Opus 编解码器（wasm）加载失败：' + (e && e.message ? e.message : e);
+  }
+  return caps;
 }
+
+function capsText() {
+  const yn = (b) => b ? '有' : '无';
+  return '本浏览器：' +
+    (caps.secure ? '安全上下文' : '非安全上下文（麦克风一定用不了）') + ' / ' +
+    '麦克风接口' + yn(caps.mic) + ' / ' +
+    'Opus 编解码（wasm）' + yn(caps.opus) +
+    (caps.why ? '　→　' + caps.why : '');
+}
+
+probeCaps().then((c) => {
+  document.getElementById('caps').textContent = capsText();
+  // 上报给电脑端：这样「为什么用不了」能在 `/debug` 里直接读到，不必靠用户描述
+  try {
+    const q = new URLSearchParams({
+      ua: navigator.userAgent.slice(0, 60),
+      secure: yn(c.secure), mic: yn(c.mic), enc: yn(c.opus),
+      dec: yn(c.opus), opus: yn(c.opus), why: c.why || '无',
+    });
+    fetch('/report-caps?' + q.toString()).catch(() => {});
+  } catch (e) { /* 上报失败不影响使用 */ }
+
+  if (!c.opus) {
+    say('这个浏览器用不了 Opus 编解码器：' + c.why +
+        '。打字与键盘照常可用。', 'err');
+    document.getElementById('bMic').disabled = true;
+    document.getElementById('bSpk').disabled = true;
+    return;   // 编解码不可用就别连了，连上也传不了音频
+  }
+  connect();
+});
 </script>
 </html>
 "##;

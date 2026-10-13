@@ -38,6 +38,7 @@ mod diag;
 mod loopback;
 pub mod proto;
 pub mod server;
+pub mod tls;
 pub mod webclient;
 
 use std::sync::{Arc, Mutex, OnceLock};
@@ -72,7 +73,16 @@ pub fn start() -> Result<String, String> {
   opus_sys::probe()?;
   // 上一次没走 stop()（比如启动后崩过）时先收干净，否则端口还占着
   stop();
-  let app = server::router(h.clone());
+
+  // 证书的 SAN 要盖住**当前**全部可直连网卡。漏了某一张的话，手机报的是「证书域名不
+  // 匹配」——那是用户完全看不懂、也没法自己解决的报错（详见 `tls` 模块的注释）
+  let ips: Vec<String> = addrs::list().into_iter().map(|n| n.ip).collect();
+  let tls = tls::load_or_create(&ips).map_err(|e| format!("准备 HTTPS 证书失败：{e}"))?;
+  let ca_pem = tls.ca_pem.clone();
+  let ca_replaced = tls.ca_replaced;
+  let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(tls.config));
+
+  let app = server::router(h.clone(), ca_pem.clone());
   let port = h.port();
   let addr = std::net::SocketAddr::from((BIND_ADDR, port));
   let hh = h.clone();
@@ -80,9 +90,23 @@ pub fn start() -> Result<String, String> {
     match tokio::net::TcpListener::bind(addr).await {
       Ok(listener) => {
         hh.set_running(true);
-        if let Err(e) = axum::serve(listener, app).await {
-          hh.set_last_error(format!("服务退出：{e}"));
-          hh.set_running(false);
+        hh.set_ca_pem(ca_pem);
+        loop {
+          // 单次 accept 失败（连接被 RST、fd 紧张）不该拖垮整个服务
+          let Ok((tcp, _peer)) = listener.accept().await else {
+            continue;
+          };
+          let acceptor = acceptor.clone();
+          let app = app.clone();
+          let hh = hh.clone();
+          tauri::async_runtime::spawn(async move {
+            // 握手失败只影响这一个客户端（多半是有人拿 http:// 探了一下这个端口）
+            if let Ok(stream) = acceptor.accept(tcp).await
+              && let Err(e) = serve_conn(stream, app).await
+            {
+              hh.set_last_error(format!("连接出错：{e}"));
+            }
+          });
         }
       }
       Err(e) => {
@@ -92,7 +116,41 @@ pub fn start() -> Result<String, String> {
     }
   });
   *TASK.lock().map_err(|_| "服务锁已中毒".to_string())? = Some(handle);
-  Ok(format!("已启动，监听 {}:{}（局域网可达）", addr.ip(), port))
+  Ok(if ca_replaced {
+    format!(
+      "已启动，HTTPS 监听 {}:{}（CA 换过了，手机上装过的旧证书需要重装一次）",
+      addr.ip(),
+      port
+    )
+  } else {
+    format!(
+      "已启动，HTTPS 监听 {}:{}（局域网可达；首次访问需信任证书，手机上装一次 CA 就永久免警告）",
+      addr.ip(),
+      port
+    )
+  })
+}
+
+/// 单个 TLS 连接：HTTP/1 与 HTTP/2 自动协商，并**开启协议升级**（`/ws` 的 WebSocket 靠它）。
+///
+/// 不能用 `axum::serve`：它的 `serve` 要求实现了 axum 的 `Listener` trait，
+/// `tokio_rustls::server::TlsStream` 没有实现，只能走 hyper-util 的 auto builder ——
+/// 后者同样支持升级。
+async fn serve_conn(
+  stream: tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+  app: axum::Router,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+  // 用 hyper-util 自带的适配器，别自己写：
+  // - `TokioIo` 把 tokio 的 `AsyncRead/AsyncWrite` 翻译成 hyper 的 `rt::Read/Write`
+  // - `TowerToHyperService` 把 axum 的 `tower::Service` 翻译成 hyper 的 `service::Service`
+  // - `TokioExecutor` spawn 到当前 tokio runtime，而当前 runtime 就是 Tauri 那个，
+  //   所以连接任务天然跟着应用生命周期走，不必自己再造执行器
+  hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
+    .serve_connection_with_upgrades(
+      hyper_util::rt::TokioIo::new(stream),
+      hyper_util::service::TowerToHyperService::new(app),
+    )
+    .await
 }
 
 /// 停服务（幂等）：真的 abort 掉监听任务，不只是清状态位。

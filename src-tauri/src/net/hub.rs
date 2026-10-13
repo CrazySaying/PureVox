@@ -192,6 +192,8 @@ pub struct NetStats {
   pub last_error: Option<String>,
   /// 库状态：Opus 版本 + 加载到的 dll 路径
   pub codec: crate::debug::Probe<String>,
+  /// 最近一个网页版客户端上报的浏览器能力（安全上下文 / 采集 / Opus 编解码）
+  pub client_caps: Option<String>,
 }
 
 impl Default for NetStats {
@@ -216,6 +218,7 @@ impl Default for NetStats {
       remote_input: false,
       last_error: None,
       codec: crate::debug::Probe::Pending,
+      client_caps: None,
     }
   }
 }
@@ -243,6 +246,10 @@ pub struct NetHub {
   /// 之所以是运行时值而不是常量：端口被别的程序占掉时，用户要能换一个。改完走
   /// `net_restart` 重绑 —— 端口是绑定那一刻定死的，改字段本身不会换掉已开的监听。
   port: AtomicU16,
+  /// 本机 CA 证书 PEM（服务启动时写入，供「下载证书」与调试接口）
+  ca_pem: Mutex<Option<String>>,
+  /// 最近一个网页版客户端上报的浏览器能力
+  client_caps: Mutex<Option<String>>,
 }
 
 impl Default for NetHub {
@@ -265,6 +272,8 @@ impl NetHub {
       stats: Mutex::new(NetStats::default()),
       running: AtomicBool::new(false),
       port: AtomicU16::new(crate::net::proto::PORT),
+      ca_pem: Mutex::new(None),
+      client_caps: Mutex::new(None),
     }
   }
 
@@ -288,6 +297,25 @@ impl NetHub {
 
   pub fn set_port(&self, v: u16) {
     self.port.store(v, Relaxed);
+  }
+
+  /// 本机 CA 证书 PEM（`~/.purevox/ca/ca.crt`）。服务启动时写进去，供界面「下载证书」按钮
+  /// 与调试接口用；没启动服务就没有（此时界面该说「先启动服务」，不是给一个空按钮）。
+  pub fn set_ca_pem(&self, pem: String) {
+    if let Ok(mut slot) = self.ca_pem.lock() {
+      *slot = Some(pem);
+    }
+  }
+
+  pub fn ca_pem(&self) -> Option<String> {
+    self.ca_pem.lock().ok().and_then(|p| p.clone())
+  }
+
+  /// 最近一个网页版客户端上报的浏览器能力（`/report-caps`）。`None` = 还没有客户端连过。
+  pub fn set_client_caps(&self, s: String) {
+    if let Ok(mut slot) = self.client_caps.lock() {
+      *slot = Some(s);
+    }
   }
 
   // ---- 远程输入开关 ----
@@ -431,6 +459,7 @@ impl NetHub {
       }
       Err(e) => crate::debug::Probe::unavailable(e),
     };
+    s.client_caps = self.client_caps.lock().ok().and_then(|c| c.clone());
     s
   }
 }
