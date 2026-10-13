@@ -98,6 +98,13 @@ class MainActivity : AppCompatActivity() {
     private var downlink: SpeakerDownlink? = null
 
     private var host = DEFAULT_HOST
+
+    /**
+     * 电脑端的端口。**独立于 host 存**，因为它是用户可改的（DESIGN.md §4.1.1），
+     * 而且改的是**电脑端**那个设置 —— 手机这边只能从地址里学（mDNS / 二维码），
+     * 学到的必须记住，否则下次启动退回 59123 就「莫名连不上」。
+     */
+    private var port = Proto.PORT
     private var connState = "未连接"
     private var connecting = false
     private var lastErr = ""
@@ -177,8 +184,22 @@ class MainActivity : AppCompatActivity() {
         // 只是掉线、服务还在 → 只重连 WebSocket，不必重新发现（那要等好几秒）
         btnReconnect.setOnClickListener { reconnect() }
 
-        // 启动就自动发现：用户扫码/打开 app 的意图就是要连那台电脑，不该先面对一个空地址框
+        // 三条路并存，谁先成谁上（DESIGN.md §4.1.1）：
+        //
+        //   1. **缓存** —— 上次连过的那台。手机和电脑通常在同一网络环境（同一个 Wi-Fi），
+        //      地址根本没变，用户**不该每次都等发现**。绝大多数情况走这条，秒连。
+        //   2. **mDNS** —— 换了 Wi-Fi / 手机热点 / 电脑 DHCP 换了地址，缓存失效时
+        //      自动找回新地址。它**同时常开着**（不是「找到就停」），所以缓存先连上、
+        //      发现结果和它一致时不会重复连。
+        //   3. **扫码 / 手填** —— 首次配对、换电脑、或组播被交换机挡了（AP 隔离）。
+        //
+        // 三者不是三条实现，是**同一个「连上电脑」动作的三种拿地址方式**（AGENTS §2.1）。
         startDiscovery()
+        // 缓存地址非空且不是出厂默认值（= 说明用户之前真的连过）就直接连，不问
+        if (host.isNotEmpty() && host != DEFAULT_HOST) {
+            log(getString(R.string.msg_reuse_cached, host))
+            connect()
+        }
 
         swMic.setOnCheckedChangeListener { _, _ ->
             applyState()
@@ -287,6 +308,34 @@ class MainActivity : AppCompatActivity() {
         return s
     }
 
+    /**
+     * 把 `host[:port]` 拆成 (host, port)，端口缺失或非法时用默认。
+     *
+     * **必须拆，不能把整个 target 当 host 传下去**：`Proto.wsUrl` 是 `"wss://$host:$port"`，
+     * 直接传 `192.168.1.5:59200` 会拼出 `wss://192.168.1.5:59200:59123/ws` —— 不是合法 URL。
+     * 而带端口的 target 恰恰是最常见的来源：电脑端二维码扫出来就是 `https://ip:端口/`，
+     * mDNS 报上来的端口也是用户在电脑上自定义过的。
+     *
+     * 裸 IPv6（多个冒号、无方括号）整串当 host —— 它的地址里本来就有冒号。
+     */
+    private fun splitTarget(target: String): Pair<String, Int> {
+        if (target.startsWith("[")) {
+            val close = target.indexOf(']')
+            if (close > 0) {
+                val h = target.substring(0, close + 1)
+                val rest = target.substring(close + 1)
+                val p = if (rest.startsWith(":")) rest.drop(1).toIntOrNull() else null
+                return h to (p?.takeIf { it in 1..65535 } ?: Proto.PORT)
+            }
+        }
+        if (target.count { it == ':' } == 1) {
+            val i = target.lastIndexOf(':')
+            val p = target.substring(i + 1).toIntOrNull()
+            if (p != null && p in 1..65535) return target.substring(0, i) to p
+        }
+        return target to Proto.PORT
+    }
+
     // ---------------------------------------------------------------- 发现
 
     /**
@@ -319,7 +368,11 @@ class MainActivity : AppCompatActivity() {
                         updateStatus()
                         return@runOnUiThread
                     }
-                    etHost.setText(h)
+                    // **端口必须一起带上**：电脑端的端口是可编辑的（DESIGN.md §4.1.1），
+                    // mDNS 报的是它在用的那个真实端口。只填 IP 会退回默认 59123，于是用户
+                    // 改过端口之后手机这边「怎么都连不上」，而症状完全看不出是端口问题。
+                    val target = if (p > 0) "$h:$p" else h
+                    etHost.setText(target)
                     etHost.isEnabled = false        // 发现到了就不用手填
                     connState = getString(R.string.msg_found, name, h, p)
                     updateStatus()
@@ -376,19 +429,23 @@ class MainActivity : AppCompatActivity() {
             showErr(getString(R.string.msg_no_target))
             return
         }
-        host = target
+        // 端口单独存：mDNS 报上来的、以及用户从二维码复制来的地址都带自定义端口，
+        // 只存 host 的话下次启动就退回默认端口，用户会看到「突然连不上了」
+        val (h, p) = splitTarget(target)
+        host = h
+        port = p
         savePrefs()
         connecting = true
         ready = false
         rttMs = Double.NaN
         lastErr = ""
         connState = "连接中…"
-        val client = WsClient(host, Proto.PORT, wsListener)
+        val client = WsClient(h, p, wsListener)
         ws = client
         client.connect()
         updateButtons()
         updateStatus()
-        log("连接 ${Proto.wsUrl(host)}")
+        log("连接 ${Proto.wsUrl(host, port)}")
     }
 
     private fun disconnect() {
@@ -480,7 +537,7 @@ class MainActivity : AppCompatActivity() {
         if (target.isNotEmpty()) host = target
         healthText = "自检中…"
         updateStatus()
-        HealthProbe.check(host) { ok, text ->
+        HealthProbe.check(host, port) { ok, text ->
             ui.post {
                 healthText = if (ok) text else "不可用 · $text"
                 log("GET /health：$healthText")
@@ -655,7 +712,7 @@ class MainActivity : AppCompatActivity() {
         val dec = downlink
         val line = StringBuilder()
         line.append(row(getString(R.string.status_conn), connState))
-        line.append(row(getString(R.string.status_host), Proto.wsUrl(host)))
+        line.append(row(getString(R.string.status_host), Proto.wsUrl(host, port)))
         line.append(
             row(
                 getString(R.string.status_rtt),
@@ -756,7 +813,9 @@ class MainActivity : AppCompatActivity() {
     private fun restorePrefs() {
         val p = getSharedPreferences(PREFS, MODE_PRIVATE)
         host = p.getString("host", DEFAULT_HOST) ?: DEFAULT_HOST
-        etHost.setText(host)
+        port = p.getInt("port", Proto.PORT)
+        // 回填成带端口的完整形式，界面上一眼能看到连的是哪个端口
+        etHost.setText(if (port == Proto.PORT) host else "$host:$port")
         swMic.isChecked = p.getBoolean("mic", false)
         swSpeaker.isChecked = p.getBoolean("speaker", false)
         swRemote.isChecked = p.getBoolean("remote", false)
@@ -765,11 +824,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun savePrefs() {
-        // 用户改了地址框但没点连接时也别丢掉（存归一后的，别把 `http://…/` 存进去）
+        // 存归一后的 host + 拆出来的端口（别把 `http://…/` 整串存进去）
         val typed = normalizeTarget(etHost.text.toString())
-        if (typed.isNotEmpty()) host = typed
+        if (typed.isNotEmpty()) {
+            val (h, pt) = splitTarget(typed)
+            host = h
+            port = pt
+        }
         getSharedPreferences(PREFS, MODE_PRIVATE).edit()
             .putString("host", host)
+            .putInt("port", port)
             .putBoolean("mic", swMic.isChecked)
             .putBoolean("speaker", swSpeaker.isChecked)
             .putBoolean("remote", swRemote.isChecked)

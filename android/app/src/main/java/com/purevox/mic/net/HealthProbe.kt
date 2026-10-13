@@ -55,6 +55,8 @@ object HealthProbe {
      * 回调 `(成功?, 说明)`，在 OkHttp 线程上调用（调用方自己切 UI 线程）。
      */
     fun check(host: String, port: Int = Proto.PORT, cb: (Boolean, String) -> Unit) {
+        // 与 WsClient 同理：证书校验前先记下目标主机，否则私有地址的自签证书也会被拒
+        LocalTls.setTarget(host)
         val request = Request.Builder().url(Proto.healthUrl(host, port)).get().build()
         try {
             client.newCall(request).enqueue(object : Callback {

@@ -78,6 +78,24 @@ object LocalTls {
     }
 
     /**
+     * 本次要连的主机。`X509TrustManager` **拿不到主机名**（它只看证书链），所以要知道
+     * 「这条链是不是连私有地址时拿到的」，只能由调用方在发起连接前记下来。
+     *
+     * 同一时刻只连一台电脑（这也是产品形态：局域网里就一台），所以一个字段够用；用
+     * `@Volatile` 是因为它跨线程（UI 线程写、OkHttp 线程读）。
+     */
+    @Volatile
+    private var targetHost: String = ""
+
+    /** 发起连接**前**记下目标主机，证书校验时据此决定放不放行。 */
+    fun setTarget(host: String) {
+        targetHost = host
+    }
+
+    /** 本次连接是否享受「私有地址放行」。 */
+    fun relaxedForTarget(): Boolean = isPrivateHost(targetHost)
+
+    /**
      * 只在**私有地址**上信任任意证书；其余地址用系统默认信任链。
      *
      * 两条路都保留，所以公网证书过期 / 主机名不匹配之类的问题仍然会照常报错，不会被
@@ -91,9 +109,16 @@ object LocalTls {
         override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) =
             platform.checkClientTrusted(chain, authType)
 
+        /**
+         * 私有地址 → 放行自签证书；其余 → 走系统校验。
+         *
+         * 注意这里**不能**无条件 `return`：那会让本 app 在任何域名上都丧失 TLS 的意义。
+         */
         @SuppressLint("TrustAllX509TrustManager")
-        override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) =
+        override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {
+            if (isPrivateHost(targetHost)) return   // 私有网段：电脑端自签，放行
             platform.checkServerTrusted(chain, authType)
+        }
 
         override fun getAcceptedIssuers(): Array<X509Certificate> = platform.acceptedIssuers
     }

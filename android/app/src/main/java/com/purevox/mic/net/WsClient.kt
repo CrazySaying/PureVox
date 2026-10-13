@@ -101,6 +101,9 @@ class WsClient(
 
     fun connect() {
         disconnect()
+        // **必须在建 client 之前**记下目标主机：证书校验发生在 OkHttp 线程上，而
+        // `X509TrustManager` 看不到主机名，只能靠这里记下的目标来判断放不放行
+        LocalTls.setTarget(host)
         val c = OkHttpClient.Builder()
             .connectTimeout(8, TimeUnit.SECONDS)
             .readTimeout(0, TimeUnit.MILLISECONDS)     // WebSocket 是长连接，不设读超时
