@@ -4,6 +4,37 @@
 本软件使用了以下开源库，感谢开源社区的贡献。
 
 ==========================================================================
+libopus（电脑端）
+==========================================================================
+
+许可证: BSD 3-Clause License
+网站: https://opus-codec.org/
+源代码: https://github.com/xiph/opus
+用途: 网络音频的 Opus 编解码。src-tauri/opus.dll 是预编译 x64 产物，运行时
+      LoadLibraryExW 加载（见 src-tauri/src/net/opus_sys.rs）；Linux 用系统
+      libopus.so.0。
+
+==========================================================================
+libopus（Android 端）
+==========================================================================
+
+许可证: BSD 3-Clause License
+版本: 1.5.2
+网站: https://opus-codec.org/
+源代码: https://github.com/xiph/opus/releases/tag/v1.5.2
+用途: 手机客户端的 Opus 编解码。
+      android/app/src/main/jniLibs/arm64-v8a/libpvopus.so 是 NDK 预编译并入库的
+      产物（内含 libopus 静态库 + 本项目的 JNI 转发层
+      android/app/src/main/cpp/pv_opus.cpp），由
+      tools/automation/build_opus_android.ps1 重建。
+
+      为什么不用 Android 的系统 MediaCodec：系统 Opus codec 注册的是
+      audio/raw、audio/ogg;codecs=opus、audio/webm;codecs=opus，后两者只认容器封装，
+      喂裸 Opus 包会输出垃圾 PCM；而 Android 上从来没有 audio/opus 这个 mime。
+
+      许可证全文见 android/app/src/main/cpp/third_party/opus/LICENSE-opus。
+
+==========================================================================
 libopus-wasm
 ==========================================================================
 

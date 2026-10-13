@@ -20,23 +20,21 @@
 package com.purevox.mic.audio
 
 import android.media.AudioFormat
-import android.media.MediaCodec
-import android.media.MediaFormat
 import android.util.Log
-import java.nio.ByteBuffer
 
 /**
- * 下行 Opus 解码器（电脑音频 → 手机）。**系统 `MediaCodec`，没有 JNI / 没有 libopus**。
+ * 下行 Opus 解码器（电脑音频 → 手机），**libopus 1.5.2**（见 [OpusNative] 为什么不用系统 codec）。
  *
- * 关键约定：**一包不等于固定帧长**。电脑端按 10 ms 发包（480 样本），但：
- * - 别的客户端可能发 2.5~60 ms 任意帧长；
- * - 本机的 Opus 解码器常输出 20 ms（960 样本），与发包帧长无关。
+ * ## 一包 ≠ 固定帧长
  *
- * 所以本类**不假设输出长度**：每次 [decode] 把所有就绪的输出缓冲都取走，按**实际样本数**
- * 回调给播放层，由播放层累积进环形缓冲。
+ * 电脑端按 10 ms 发包（480 样本），但别的客户端可能发 2.5~60 ms 任意帧长。所以**不假设
+ * 输出长度**：每次 [decode] 按 libopus 实际解出的样本数回调给播放层，由播放层累积进环形缓冲。
+ * JNI 的输出缓冲按 Opus 单帧上限（120 ms）给足，避免帧长比预期长时被截断。
  *
- * 输出 PCM 格式以 `MediaCodec.getOutputFormat()` 为准（权威），而不是猜；
- * 拿不到该字段时按 AOSP 默认的 16 bit 处理。
+ * ## 丢包用 PLC，不要静音
+ *
+ * 包解不出来（真丢包）时传 null 走 libopus 的 **PLC**：它按上一帧的频谱合成补偿，
+ * 比直接补静音自然得多（尤其低码率语音，静音的间隔非常刺耳）。
  *
  * 调用线程：只有播放层的解码线程会调 [decode]，本类内部无锁。
  */
@@ -45,170 +43,94 @@ class OpusDecoder {
     companion object {
         private const val TAG = "PureVoxDec"
 
-        /** 单包上限，与 [OpusEncoder.MAX_PACKET] 对齐（Opus 单包最大 1275 字节 × 帧数富余）。 */
+        /** 单包上限，与 [OpusEncoder.MAX_PACKET] 对齐。 */
         const val MAX_PACKET = 4000
 
-        /** 输出缓冲暂存区（一次 dequeue 的输出按样本拷贝到这里，回调方必须立刻消费）。 */
-        private const val SCRATCH_SAMPLES = 16384
+        /**
+         * 解码输出缓冲的样本数：Opus 单帧最长 120 ms @48 kHz = 5760。
+         * 用上限而不是 480 是因为**帧长由发包方决定**，按 480 开缓冲会把长帧截断（听起来是"咔"一声）。
+         */
+        private const val SCRATCH_SAMPLES = 5760
     }
 
     /** 实际生效的解码器名。 */
-    var codecName: String = ""
+    var codecName: String = "libopus"
         private set
 
-    /** 实际生效的输出 PCM 格式（由 `getOutputFormat()` 确认）。 */
-    var outputEncoding: Int = AudioFormat.ENCODING_PCM_16BIT
-        private set
-
-    /** 因输入槽忙而丢弃的包数（理论极少；统计出来是因为「看不见的状态等于不存在的状态」）。 */
+    /** 丢弃的包数（理论极少；统计出来是因为「看不见的状态等于不存在的状态」）。 */
     var dropped: Long = 0L
         private set
 
-    private var codec: MediaCodec? = null
-    private val info = MediaCodec.BufferInfo()
+    /** 走 PLC 补偿的次数：正常应为 0，持续非 0 说明网络在抖。 */
+    var concealed: Long = 0L
+        private set
+
+    private var handle: Long = 0
     private val scratch = FloatArray(SCRATCH_SAMPLES)
     private var onPcm: ((FloatArray, Int) -> Unit)? = null
 
-    /** 下一个包的时间戳基准（微秒），单调递增。 */
-    private var pts = 0L
-
-    /**
-     * 建好解码器并 `start()`。成功返回解码器名，失败抛 [IllegalStateException]。
-     */
+    /** 建好解码器。成功返回 [codecName]，失败抛 [IllegalStateException]（消息已含原因）。 */
     fun start(onPcm: (FloatArray, Int) -> Unit): String {
         stop()
+        OpusNative.require()
         this.onPcm = onPcm
-        val probe = OpusSupport.probe()
-        val name = probe.decoder
-            ?: throw IllegalStateException("本机没有 Opus 解码器（audio/opus），无法收听电脑音频。${probe.detail}")
-        var lastReason = "未知"
-        for (pcm in OpusSupport.decoderPcmPreference()) {
-            try {
-                codec = buildAndStart(name, pcm)
-                codecName = name
-                Log.i(TAG, "解码器就绪：$name（请求输出 ${OpusSupport.pcmName(pcm)}）")
-                return name
-            } catch (e: Throwable) {
-                lastReason = e.message ?: e.javaClass.simpleName
-                Log.w(TAG, "解码器 $name pcm=$pcm 不可用：$lastReason")
-            }
+        val h = OpusNative.decCreate(OpusEncoder.SAMPLE_RATE, OpusEncoder.CHANNELS)
+        if (h == 0L) {
+            val why = "${OpusNative.lastError()}（code ${OpusNative.lastErrorCode()}）"
+            throw IllegalStateException("Opus 解码器创建失败：$why")
         }
-        stop()
-        throw IllegalStateException("Opus 解码器配置失败：$lastReason")
+        handle = h
+        codecName = "libopus ${OpusNative.version}"
+        Log.i(TAG, "解码器就绪：$codecName  输出缓冲 ${SCRATCH_SAMPLES} 样本（120 ms）")
+        return codecName
     }
 
     /** 投喂一个 Opus 包（[pkt] 前 [len] 字节有效）并把解出的样本交给回调。 */
     fun decode(pkt: ByteArray, len: Int) {
-        val c = codec ?: return
-        drainOutput(c)
-        val idx = c.dequeueInputBuffer(0)
-        if (idx < 0) {
-            dropped++
+        val h = handle
+        if (h == 0L) return
+        val n = len.coerceIn(0, MAX_PACKET)
+        if (n == 0) {
+            plc()
             return
         }
-        val buf = c.getInputBuffer(idx)
-        if (buf == null) {
-            c.queueInputBuffer(idx, 0, 0, 0L, 0)
-            return
-        }
-        buf.clear()
-        val n = len.coerceIn(0, MAX_PACKET).coerceAtMost(buf.capacity())
-        buf.put(pkt, 0, n)
-        // presentationTimeUs 用单调递增的采样序号换算：帧长不固定，用真实时间戳会
-        // 引入漂移，也让解码器按 PTS 做抖动缓冲时行为不可预期。
-        val ptsUs = n.toLong() * 1_000_000L / OpusEncoder.SAMPLE_RATE
-        pts += ptsUs
-        c.queueInputBuffer(idx, 0, n, pts, 0)
-        drainOutput(c)
+        val r = OpusNative.decDecode(h, pkt, n, scratch, SCRATCH_SAMPLES)
+        emit(r)
+    }
+
+    /**
+     * 丢包补偿：按上一帧频谱合成一帧（[SCRATCH_SAMPLES] 是 120 ms，按协议帧长只取前面一段）。
+     *
+     * 取多少样本取决于编码方用的帧长，而客户端不知道——所以固定用协议约定的 10 ms
+     * （480 样本）；真发来别的帧长的包时上面 [decode] 会解出对应的样本数，播放层累积即可。
+     */
+    fun plc() {
+        val h = handle
+        if (h == 0L) return
+        val r = OpusNative.decDecode(h, null, 0, scratch, SCRATCH_SAMPLES)
+        concealed++
+        emit(r)
     }
 
     fun stop() {
-        val c = codec
-        codec = null
+        val h = handle
+        handle = 0
         onPcm = null
-        dropped = 0L
-        pts = 0L
-        if (c == null) return
-        try {
-            c.stop()
-        } catch (e: Throwable) {
-            Log.w(TAG, "stop 异常", e)
-        }
-        c.release()
+        dropped = 0
+        concealed = 0
+        if (h != 0L) OpusNative.decDestroy(h)
     }
 
     // ---------------------------------------------------------------- 内部
 
-    private fun buildAndStart(name: String, pcmEncoding: Int): MediaCodec {
-        val format = MediaFormat().apply {
-            setString(MediaFormat.KEY_MIME, OpusSupport.MIME)
-            setInteger(MediaFormat.KEY_SAMPLE_RATE, OpusEncoder.SAMPLE_RATE)
-            setInteger(MediaFormat.KEY_CHANNEL_COUNT, OpusEncoder.CHANNELS)
-            setInteger(MediaFormat.KEY_PCM_ENCODING, pcmEncoding)
+    private fun emit(samples: Int) {
+        if (samples < 0) {
+            dropped++
+            Log.w(TAG, "解码失败：${OpusNative.lastError()}（code $samples）")
+            return
         }
-        val c = MediaCodec.createByCodecName(name)
-        try {
-            c.configure(format, null, null, 0)
-            c.start()
-        } catch (e: Throwable) {
-            try {
-                c.release()
-            } catch (e2: Throwable) {
-                Log.w(TAG, "release 异常", e2)
-            }
-            throw e
-        }
-        return c
-    }
-
-    private fun drainOutput(c: MediaCodec) {
-        var guard = 0
-        while (guard++ < 64) {
-            val idx = c.dequeueOutputBuffer(info, 0)
-            if (idx == MediaCodec.INFO_TRY_AGAIN_LATER) return
-            if (idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                readOutputFormat(c.outputFormat)
-                continue
-            }
-            if (idx < 0) return
-            var samples = 0
-            val buf = c.getOutputBuffer(idx)
-            if (buf != null && info.size > 0) {
-                buf.position(info.offset)
-                buf.limit(info.offset + info.size)
-                samples = readSamples(buf)
-            }
-            c.releaseOutputBuffer(idx, false)
-            if (samples > 0) onPcm?.invoke(scratch, samples)
-        }
-    }
-
-    private fun readSamples(buf: ByteBuffer): Int {
-        return if (outputEncoding == AudioFormat.ENCODING_PCM_FLOAT) {
-            val fb = buf.asFloatBuffer()
-            val n = fb.remaining().coerceAtMost(scratch.size)
-            fb.get(scratch, 0, n)
-            n
-        } else {
-            val sb = buf.asShortBuffer()
-            val n = sb.remaining().coerceAtMost(scratch.size)
-            for (i in 0 until n) scratch[i] = sb.get(i) / 32768f
-            n
-        }
-    }
-
-    private fun readOutputFormat(format: MediaFormat) {
-        try {
-            if (format.containsKey(MediaFormat.KEY_PCM_ENCODING)) {
-                val enc = format.getInteger(MediaFormat.KEY_PCM_ENCODING)
-                if (enc != outputEncoding) {
-                    outputEncoding = enc
-                    Log.i(TAG, "解码输出 PCM 改为 ${OpusSupport.pcmName(enc)}")
-                }
-            }
-            Log.i(TAG, "解码输出格式：$format")
-        } catch (e: Throwable) {
-            Log.w(TAG, "读输出格式失败", e)
-        }
+        if (samples == 0) return
+        val n = samples.coerceAtMost(scratch.size)
+        onPcm?.invoke(scratch, n)
     }
 }

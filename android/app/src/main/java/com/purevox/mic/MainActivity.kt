@@ -172,8 +172,8 @@ class MainActivity : AppCompatActivity() {
         bindViews()
         restorePrefs()
 
-        opusDetail = OpusSupport.probe().detail
-        if (opusDetail.isEmpty()) opusDetail = "未探测到 audio/opus 编解码器"
+        // 一行说明「现在在用什么 + 为什么不碰系统 codec」，不是探测结果而是编解码器的身份
+        opusDetail = OpusSupport.describe()
 
         btnConnect.setOnClickListener {
             if (ws == null && !connecting) connect() else disconnect()
@@ -727,7 +727,9 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     "${c.txPackets.get()} 包" + if (enc != null) {
                         " · 编码 ${enc.encoderName} · 采集 ${OpusSupport.pcmName(enc.recordEncoding)}" +
-                            " · 电平 ${String.format("%.2f", enc.level)}"
+                            " · 电平 ${String.format("%.2f", enc.level)}" +
+                            " · 编出 ${enc.encoderPackets} 包" +
+                            if (enc.encoderDroppedSamples > 0) " · 丢 ${enc.encoderDroppedSamples} 样本" else ""
                     } else {
                         " · 未开启"
                     }

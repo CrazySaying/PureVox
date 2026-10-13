@@ -20,7 +20,11 @@
 #   sdkmanager 的默认包列表里有已下架的 `tools`，必须显式给平台与 build-tools；
 #   android-actions/setup-android 只为它自己的 `packages` 装包，平台/branch 由本脚本负责。
 # 版本号来自 tools/automation/versions.env（唯一来源），不在这里硬编码。
-# 注意：本工程**不需要 NDK / CMake**（Opus 走系统 MediaCodec，无 JNI），勿再加。
+# 注意：本工程**构建时不需要 NDK / CMake**，但原因不是「没有 JNI」——`libpvopus.so`
+#   （libopus 1.5.2 + `cpp/pv_opus.cpp` 的 JNI 转发层）是用 NDK **预编译并入库**的产物，
+#   放在 `android/app/src/main/jniLibs/arm64-v8a/`，Gradle 不跑 native 代码，所以 CI 与本机
+#   都不必装 NDK。要重建那个 .so 才需要 NDK + CMake，走
+#   `tools/automation/build_opus_android.ps1`。勿在本脚本里加 NDK。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

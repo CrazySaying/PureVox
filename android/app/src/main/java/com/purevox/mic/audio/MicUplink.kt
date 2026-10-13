@@ -73,6 +73,13 @@ class MicUplink(
     var level: Float = 0f
         private set
 
+    /**
+     * 编码器产出/丢弃的包数与样本数。**状态栏要能看到**——「声音刺啦」有两种可能
+     * （编码失败 / FIFO 溢出丢帧），数字能直接区分，不用去抓 logcat。
+     */
+    val encoderPackets: Long get() = encoder?.packets ?: 0L
+    val encoderDroppedSamples: Long get() = encoder?.dropped ?: 0L
+
     private var record: AudioRecord? = null
     private var encoder: OpusEncoder? = null
     private var thread: Thread? = null

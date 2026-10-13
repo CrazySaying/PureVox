@@ -124,14 +124,27 @@ release 构建同样保留（不允许用编译开关剔除）。
   `remote_speaker` 输出行（电脑→手机扬声器，按位置 tap）、远程输入（`text` 打字 + `key`
   全尺寸键盘，**两件事分开**，用 `net_set_remote_input` 开关且**默认关闭**）。
   命令 `net_start` / `net_stop` / `net_status` / `net_set_remote_input`；状态进快照 `net` 段。
-  - **Opus 不引入 C 编译链**：`net/opus_sys.rs` 运行时动态加载——Windows 用
+  - **Opus 不引入 C 编译链（电脑端）**：`net/opus_sys.rs` 运行时动态加载——Windows 用
     `LoadLibraryExW` + `GetProcAddress` 加载预编译 x64 `opus.dll`（`src-tauri/opus.dll`，
     随包分发；`tauri.conf.json` 的 resources 已登记；查找 `<exe 同目录>/opus.dll` →
     仓库 `src-tauri/opus.dll`），Linux 用 `dlopen`/`dlsym` 加载系统 `libopus.so.0`
     （Debian 包名 `libopus0`；缺失时网络音频降级为明确原因，其余功能正常）。
     注意 `opus_encoder_get_size` / `opus_decoder_get_size` 是**兼容桩恒返回 0**，
     一律用 `*_create`（libopus 内部分配）。**帧长不固定**：PC 发 10 ms（= 1 hop），
-    接收端按样本累积后重切 hop（Android 的 opus 常见 20 ms），10 ms 网格不受影响。
+    接收端按样本累积后重切 hop，10 ms 网格不受影响。
+  - **Android 端 Opus = 内置 libopus，不用系统 MediaCodec**（§1.2 续）：`libpvopus.so`
+    （`jniLibs/arm64-v8a/`，NDK 预编译入库，含 libopus 1.5.2 静态库 + `cpp/pv_opus.cpp`
+    的 JNI 转发层；**Gradle 构建不需要 NDK**，CI 也不用装），重建走
+    `tools/automation/build_opus_android.ps1`。**原因**：Android 上**从来没有
+    `audio/opus` 这个 mime**——系统 Opus codec 注册的是 `audio/raw` /
+    `audio/ogg;codecs=opus` / `audio/webm;codecs=opus`，后两者只认容器封装，喂裸 Opus
+    包会**照单全收并输出垃圾 PCM（听感满屏刺啦且不报错）**；想吃裸包就得自己实现
+    Ogg/WebM 封装，那是拿「省一个依赖」换「自己维护一个协议」。libopus 是参考实现，
+    且与网页版的 `libopus-wasm` 同源，两端天然对齐。`audio/OpusSupport.kt` 因此**只剩
+    诊断**（把本机系统 codec 列出来，解释为什么不采用），**不是第二条实现路径**。
+    JNI 边界上做 float↔int16 转换（libopus 只吃 `opus_int16`；`OPUS_SET_INPUT_SIGNATURE`
+    那套只在自定义构建里有，标准构建走 `OPUS_SET_LSB_DEPTH(16)`），Java 侧仍是
+    `FloatArray` 全链路，转换只发生一次。
   - **主时钟在引擎侧**：网络任务只把解码后的样本塞进队列（进出各有界：目标 50 ms、
     硬顶 80 ms，超限丢最旧），由列工作线程按自己的 10 ms 节拍取；欠载补静音。
   - **出站节拍用绝对时刻**（`next += 10ms` 再 `sleep_until(next)`），不要
@@ -298,6 +311,10 @@ release 构建同样保留（不允许用编译开关剔除）。
 5. **旧实现遗留二进制**（新实现不再引用的一律收进只读快照 `legacy-v2026.09.30.1944/`，
    现役树里只留仍在用的）：
    - **现役引用**：`server/opus.dll`（Windows 网络 Opus，运行时加载，见 §1.2）、
+     `android/app/src/main/jniLibs/arm64-v8a/libpvopus.so`（Android 网络 Opus，内含
+     libopus 1.5.2 静态库 + `android/app/src/main/cpp/pv_opus.cpp` 的 JNI 转发层，
+     NDK 预编译入库，**重建用 `tools/automation/build_opus_android.ps1`**）、
+     `android/app/src/main/cpp/third_party/opus/{include/*.h, arm64-v8a/libopus.a}`（同上，编译输入）、
      `android/gradle/wrapper/gradle-wrapper.jar`（Android 客户端构建，**勿替换**）、
      `assets/icons/audio_icon_base.png`（`cargo tauri icon` 源图）。
    - **已收进快照**（新实现不引用，现役树里对应文件已删除，只存快照备查）：
