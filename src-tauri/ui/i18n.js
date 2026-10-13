@@ -169,6 +169,12 @@
     '网络服务失败：': 'Network service failed: ',
     '客户端地址': 'Client address',
     '取不到本机地址': 'Cannot determine this machine\'s address',
+    '下载证书（手机装一次）': 'Download certificate (install once on the phone)',
+    '手机浏览器打开这个地址下载 CA 证书，装到系统里，之后扫码访问就不会再报警告了':
+      'Open this address on the phone to download the CA certificate and install it into the system; after that, scanning no longer shows a warning',
+    '证书还没准备好：先启动服务': 'The certificate is not ready yet: start the service first',
+    'CA 证书已下载': 'CA certificate downloaded',
+    '取证书失败：': 'Could not read the certificate: ',
     '网卡': 'Network interface',
     '端口': 'Port',
     '自动（默认路由）': 'Automatic (default route)',

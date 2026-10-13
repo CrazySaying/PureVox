@@ -330,6 +330,40 @@
     netBox.appendChild(portIn)
     box.appendChild(netBox)
 
+    // 3) 装 CA 证书的按钮。网页版的麦克风靠 `getUserMedia`，它只在**安全上下文**里可用，
+    //    所以必须走 https（DESIGN.md §4.1.1）。装一次 CA 之后手机就永久不再报警。
+    //    按钮放在这里而不是「设置」里，因为它和地址、端口是同一件事：地址决定去哪台机器。
+    const caBtn = document.createElement('button')
+    caBtn.type = 'button'
+    caBtn.className = 'netcard-ca'
+    caBtn.textContent = T('下载证书（手机装一次）')
+    caBtn.title = T(
+      '手机浏览器打开这个地址下载 CA 证书，装到系统里，之后扫码访问就不会再报警告了',
+    )
+    caBtn.addEventListener('click', async () => {
+      caBtn.disabled = true
+      try {
+        const pem = await invoke('net_ca_pem')
+        if (!pem) {
+          if (window.__pvDebug) window.__pvDebug(T('证书还没准备好：先启动服务'))
+          return
+        }
+        // 用 Blob + a[download]：不经过服务端额外路由，证书内容直接来自 Rust 侧读的那份
+        const url = URL.createObjectURL(new Blob([pem], { type: 'application/x-x509-ca-cert' }))
+        const a = document.createElement('a')
+        a.href = url
+        a.download = 'purevox-ca.crt'
+        a.click()
+        URL.revokeObjectURL(url)
+        if (window.__pvDebug) window.__pvDebug(T('CA 证书已下载'))
+      } catch (e) {
+        if (window.__pvDebug) window.__pvDebug(T('取证书失败：') + String(e))
+      } finally {
+        caBtn.disabled = false
+      }
+    })
+    box.appendChild(caBtn)
+
     /**
      * 重建网卡下拉的选项。
      *

@@ -107,6 +107,10 @@ class WsClient(
             .writeTimeout(10, TimeUnit.SECONDS)
             .pingInterval(20, TimeUnit.SECONDS)        // 协议层保活，与应用层 ping 互不替代
             .retryOnConnectionFailure(true)
+            // 电脑端是 HTTPS 且证书自签（每台机器自己签）。只对**私有网段**放行，
+            // 公网地址仍走系统校验——理由见 LocalTls 的注释。
+            .sslSocketFactory(LocalTls.socketFactory(), LocalTls.trustManager())
+            .hostnameVerifier(LocalTls.hostnameVerifier())
             .build()
         client = c
         val request = Request.Builder()

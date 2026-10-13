@@ -45,6 +45,9 @@ object HealthProbe {
         OkHttpClient.Builder()
             .connectTimeout(4, TimeUnit.SECONDS)
             .readTimeout(4, TimeUnit.SECONDS)
+            // 与 WsClient 同一套：自签证书只对私有网段放行，公网仍走系统校验
+            .sslSocketFactory(LocalTls.socketFactory(), LocalTls.trustManager())
+            .hostnameVerifier(LocalTls.hostnameVerifier())
             .build()
     }
 

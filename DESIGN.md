@@ -257,6 +257,43 @@ TXT 只放 `v=<显示版本>` 与 `proto=<协议号>`，**不放 host** —— m
 的，再放一遍是冗余。只在服务启动后广播，所以「服务没开 → 客户端扫不到 / 发现不到」是
 **预期行为**，界面上要写明，不要让人以为二维码坏了。
 
+#### 4.1.2 HTTPS 与编解码（2026-10-13 定）
+
+**服务只监听 HTTPS**（`wss://`），二维码指向 `https://<ip>:<port>/`。
+
+**为什么必须是 HTTPS**：网页版客户端的麦克风靠 `getUserMedia`，它**只在安全上下文里可用**。
+`http://192.168.x.x` 不是安全上下文，浏览器**直接拒绝**且**没有任何绕过办法**（不是证书
+问题，是整个 origin 被判不可信）。这不是「配了就能用」，是纯 HTTP 下网页版麦克风根本
+不可能工作。
+
+**编解码在客户端，用 wasm**（`net/wasm/libopus-wasm.js`，MIT，预编译产物随包分发，
+`不新增 C 编译链`）。**不用浏览器内置的 WebCodecs**：`AudioEncoder` / `AudioDecoder` 只有
+Chrome 94+ / Safari 16.4+ 才有，实测就有浏览器根本没有，于是麦克风与扬声器一起不可用；
+wasm 只要浏览器有 `WebAssembly` 就行。帧长按引擎 hop 配（`channels:1, frameSize:480`），
+与服务端队列 `[f32; HOP]` 零转换。旧 Python 实现用 WASM 版 libopus，但那个 wasm **只有
+编码器**（legacy 网页版只做上行），要下行就得上两套东西 —— 现在编解码一体。
+
+**自签证书必须是「CA + 叶」两级**，不能是一张自签：Android 的「安装证书 → CA 证书」只接受
+`basicConstraints: CA:TRUE`，普通自签服务器证书（`CA:FALSE`）装不进去。不想装证书的用户，
+浏览器点一次「继续」即可（Chrome 绕过证书错误后仍算安全上下文）。
+
+- CA（10 年）存 `~/.purevox/ca/ca.{key,crt}`，长期不变；叶证书（397 天）SAN 覆盖
+  `localhost` + **当前全部可直连 IPv4`，换网络就重签。
+- 覆盖清单另存 `server.ips`（不解析证书：`rcgen` 的 `from_ca_cert_pem` 是 `pub(crate)`，
+  为读一个 SAN 引 `x509-parser` feature 不值）。读不出清单一律当作**没覆盖**、重签。
+- `KeyPair::serialize_pem()` 写的是 PKCS#8，读回必须显式给算法（`from_pkcs8_pem_and_sign_algo`）。
+  legacy 的 RSA 私钥一定解析不了，所以**读不回来直接覆盖重签**，不报错卡死（旧 CA 只是本地
+  自签，不值得为它让服务起不来）。
+- 重签**不打断已有连接**：证书只在 `start()` 时读一次，要生效等下次重启服务。
+- `/ca-cert` 下载 CA、`/libopus-wasm.js` 与 `/generated/libopus.generated.mjs` 提供编解码器。
+  后两者**必须长缓存**（编译期产物，运行期不变），而网页 `/` 反过来**必须不缓存**。
+
+**APK 走同一个 HTTPS 端口**，但**只对私有网段放行自签证书**（`LocalTls.kt`）：`10/8`、
+`172.16/12`、`192.168/16`、`127/8`、`169.254/16`、IPv6 的 `::1` / `fe80::/10` / `fc00::/7`。
+**不用「无条件信任所有证书」**——那是安全反模式，会让这个 app 在任何域名上都丧失 TLS 的意义。
+放行范围与「局域网无鉴权」的威胁模型一致（这些地址公网不可路由）。APK 用系统 `MediaCodec`
+编 Opus，**不需要**安全上下文；这套 TLS 的唯一目的是让**浏览器**拿到安全上下文。
+
 **客户端侧（APK）**：**自动发现为主，手动是兜底**。
 
 - 启动即 `NsdManager.discoverServices("_purevox._tcp")`；找到就自动填地址并显示

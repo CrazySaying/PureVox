@@ -47,9 +47,17 @@ object Proto {
     /** 上行建议码率（bit/s）；电脑端出站也是 32 k。 */
     const val BITRATE = 32000
 
-    fun wsUrl(host: String, port: Int = PORT): String = "ws://$host:$port$WS_PATH"
+    /**
+     * WebSocket 地址。**必须是 `wss://`**：电脑端的服务是 HTTPS（DESIGN.md §4.1.1）。
+     *
+     * 为什么必须 HTTPS：`getUserMedia` 之类要「安全上下文」，而 `http://<局域网IP>` 不是；
+     * 更根本的是**编解码器放在浏览器里**，非安全上下文下浏览器直接禁用。同样地，
+     * 电脑端自签证书也逼着这里走 TLS —— 混协议的代价是「一半能用一半不能用」。
+     */
+    fun wsUrl(host: String, port: Int = PORT): String = "wss://$host:$port$WS_PATH"
 
-    fun healthUrl(host: String, port: Int = PORT): String = "http://$host:$port$HEALTH_PATH"
+    /** 自检地址，同样走 HTTPS。 */
+    fun healthUrl(host: String, port: Int = PORT): String = "https://$host:$port$HEALTH_PATH"
 
     /** `{"t":"hello","proto":1}` —— 连上必须先握手，电脑回 `ready` 才算可用。 */
     fun hello(): String = JSONObject().put("t", "hello").put("proto", VERSION).toString()

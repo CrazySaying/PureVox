@@ -73,22 +73,35 @@ const LIBOPUS_JS: &[u8] = include_bytes!("wasm/libopus-wasm.js");
 const LIBOPUS_GENERATED: &[u8] = include_bytes!("wasm/generated/libopus.generated.mjs");
 
 async fn libopus_wasm_js() -> impl IntoResponse {
-  (
-    [(
-      axum::http::header::CONTENT_TYPE,
-      axum::http::HeaderValue::from_static("text/javascript; charset=utf-8"),
-    )],
-    LIBOPUS_JS,
-  )
+  wasm_asset(LIBOPUS_JS)
 }
 
 async fn libopus_wasm_generated() -> impl IntoResponse {
+  wasm_asset(LIBOPUS_GENERATED)
+}
+
+/// wasm 产物的响应头。
+///
+/// **必须给长缓存**：这两个文件是编译期产物，随版本变、运行期不变。手机上扫码会反复打开
+/// 页面，没有缓存头就每次重下 377 KB；有了就第二次几乎瞬间。网页本身（`/`）反过来
+/// **不能**缓存——它内嵌页面内容，改了就得立刻生效。
+///
+/// `no-cache`（而不是 `no-store`）意思是「可以存，但每次必须回服务器验证」：配合
+/// `ETag` / `Last-Modified` 就能拿到 304，几 KB 的往返，远小于重下 377 KB。
+fn wasm_asset(body: &'static [u8]) -> impl IntoResponse {
+  use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE, ETAG, HeaderValue};
+  // 产物内容不变，用长度当 ETag 足够（变了长度必变；等长改动由发布新版本覆盖）
+  let etag = format!("\"{}\"", body.len());
   (
-    [(
-      axum::http::header::CONTENT_TYPE,
-      axum::http::HeaderValue::from_static("text/javascript; charset=utf-8"),
-    )],
-    LIBOPUS_GENERATED,
+    [
+      (CONTENT_TYPE, HeaderValue::from_static("text/javascript; charset=utf-8")),
+      (
+        CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=0, must-revalidate"),
+      ),
+      (ETAG, HeaderValue::from_str(&etag).unwrap_or_else(|_| HeaderValue::from_static("\"0\""))),
+    ],
+    body,
   )
 }
 
@@ -155,12 +168,20 @@ async fn ca_cert_download(ca_pem: String) -> impl IntoResponse {
 /// WebSocket 升级入口。
 /// 网页版客户端（`GET /`）。二维码指向这里，扫码即开；它自己连 `/ws`，协议与 APK 同源。
 async fn web_page() -> impl IntoResponse {
-  use axum::http::header::{CONTENT_TYPE, HeaderValue};
+  use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE, HeaderValue};
   (
-    [(
-      CONTENT_TYPE,
-      HeaderValue::from_static("text/html; charset=utf-8"),
-    )],
+    [
+      (
+        CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+      ),
+      // 页面**不许缓存**（它内嵌内容，改了要立刻生效）；而 `/libopus-wasm.js` 那些产物
+      // 相反，要长缓存——见 `wasm_asset` 的注释
+      (
+        CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+      ),
+    ],
     super::webclient::PAGE,
   )
 }

@@ -698,6 +698,8 @@ td { padding: 3px 8px 3px 0; overflow: hidden; text-overflow: ellipsis; }
 /* 端口框定宽 + 等宽数字（`mono` 已带 `tabular-nums`）：改端口时宽度不能跳，
    否则光标位置会飘。 */
 .netcard-port { width: 6em; flex: 0 0 auto; }
+/* 「下载证书」按钮：跟地址/端口同属一件事，所以放在那块下面而不是「设置」里 */
+.netcard-ca { align-self: flex-start; font-size: 12px; }
 
 /* 滚动条：细一点，别抢视觉 */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
