@@ -39,6 +39,7 @@ import androidx.core.content.ContextCompat
 import com.purevox.mic.audio.MicUplink
 import com.purevox.mic.audio.OpusSupport
 import com.purevox.mic.audio.SpeakerDownlink
+import com.purevox.mic.net.Discovery
 import com.purevox.mic.net.HealthProbe
 import com.purevox.mic.net.WsClient
 import com.purevox.mic.service.CaptureService
@@ -119,10 +120,19 @@ class MainActivity : AppCompatActivity() {
     private var suppressTextSync = false
     private var applyingState = false
 
+    /** 局域网自动发现。发现到就自动填地址并连上；找不到才让用户手动填。 */
+    private var discovery: Discovery? = null
+    /** 已通过 mDNS 发现到电脑（此时地址框只是「看一眼」，不是主路径）。 */
+    private var found = false
+    /** 发现到的协议版本；与本客户端不一致时明确告诉用户「客户端太旧」。 */
+    private var foundProto: Int? = null
+
     // 界面控件
     private lateinit var etHost: EditText
     private lateinit var btnConnect: Button
     private lateinit var btnHealth: Button
+    private lateinit var btnRediscover: Button
+    private lateinit var btnReconnect: Button
     private lateinit var tvStatus: TextView
     private lateinit var tvHealth: TextView
     private lateinit var tvErr: TextView
@@ -162,6 +172,13 @@ class MainActivity : AppCompatActivity() {
             if (ws == null && !connecting) connect() else disconnect()
         }
         btnHealth.setOnClickListener { runHealthCheck() }
+        // 换 Wi-Fi / 刚才没搜到 → 重新发现（停掉再 discover，不复用旧监听）
+        btnRediscover.setOnClickListener { rediscover() }
+        // 只是掉线、服务还在 → 只重连 WebSocket，不必重新发现（那要等好几秒）
+        btnReconnect.setOnClickListener { reconnect() }
+
+        // 启动就自动发现：用户扫码/打开 app 的意图就是要连那台电脑，不该先面对一个空地址框
+        startDiscovery()
 
         swMic.setOnCheckedChangeListener { _, _ ->
             applyState()
@@ -227,6 +244,10 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         ui.removeCallbacks(ticker)
+        // 发现监听必须停：`NsdManager` 的监听会一直占着（耗电），且下次启动重复注册会抛
+        // `IllegalArgumentException`
+        discovery?.stop()
+        discovery = null
         teardown()
         super.onDestroy()
     }
@@ -266,12 +287,93 @@ class MainActivity : AppCompatActivity() {
         return s
     }
 
+    // ---------------------------------------------------------------- 发现
+
+    /**
+     * 开始（或重新开始）自动发现。
+     *
+     * 「重新发现」按钮走这里：先 `stop()` 再 `start()`。**不复用旧监听** —— `NsdManager`
+     * 的监听一旦注册就绑定了当时的网络状态，换了 Wi-Fi 之后它不会自己跟上，必须重来。
+     */
+    private fun rediscover() {
+        startDiscovery()
+        connState = getString(R.string.msg_discovering)
+        updateStatus()
+        log(getString(R.string.msg_discovering))
+    }
+
+    private fun startDiscovery() {
+        discovery?.stop()
+        found = false
+        foundProto = null
+        val d = Discovery(
+            this,
+            onFound = { h, p, name, proto ->
+                runOnUiThread {
+                    found = true
+                    foundProto = proto
+                    // 协议版本不符**不要连**：连上去会被服务端直接断开，只会让用户看到
+                    // 一个没有解释的「已断开」。明确说是版本问题才有意义。
+                    if (proto != null && proto != Proto.VERSION) {
+                        connState = getString(R.string.msg_proto_mismatch, Proto.VERSION, proto)
+                        updateStatus()
+                        return@runOnUiThread
+                    }
+                    etHost.setText(h)
+                    etHost.isEnabled = false        // 发现到了就不用手填
+                    connState = getString(R.string.msg_found, name, h, p)
+                    updateStatus()
+                    // 自动连上：发现即连接，用户什么都不用点
+                    if (ws == null && !connecting) connect()
+                }
+            },
+            onLost = { name ->
+                runOnUiThread {
+                    found = false
+                    etHost.isEnabled = true          // 服务没了 → 把手动填的路子还回来
+                    if (ws == null) connState = getString(R.string.msg_lost, name)
+                    updateStatus()
+                }
+            },
+            onError = { msg ->
+                runOnUiThread {
+                    etHost.isEnabled = true
+                    if (ws == null) connState = msg
+                    updateStatus()
+                }
+            },
+        )
+        discovery = d
+        if (!d.available) {
+            etHost.isEnabled = true
+            return
+        }
+        d.start()
+    }
+
+    /** 只重连 WebSocket，不重新发现（服务还在时用这个，快得多）。 */
+    private fun reconnect() {
+        val target = normalizeTarget(etHost.text.toString())
+        if (target.isEmpty()) {
+            showErr(getString(R.string.msg_no_target))
+            return
+        }
+        // 发现结果已经失效（例如换了 Wi-Fi）时，重连多半会失败，直接退回重新发现
+        if (!found) {
+            rediscover()
+            return
+        }
+        ws?.disconnect()
+        ws = null
+        connect()
+    }
+
     // ---------------------------------------------------------------- 连接
 
     private fun connect() {
         val target = normalizeTarget(etHost.text.toString())
         if (target.isEmpty()) {
-            showErr("请先填写电脑的 IP 或主机名")
+            showErr(getString(R.string.msg_no_target))
             return
         }
         host = target
@@ -637,6 +739,8 @@ class MainActivity : AppCompatActivity() {
         etHost = findViewById(R.id.etHost)
         btnConnect = findViewById(R.id.btnConnect)
         btnHealth = findViewById(R.id.btnHealth)
+        btnRediscover = findViewById(R.id.btnRediscover)
+        btnReconnect = findViewById(R.id.btnReconnect)
         tvStatus = findViewById(R.id.tvStatus)
         tvHealth = findViewById(R.id.tvHealth)
         tvErr = findViewById(R.id.tvErr)

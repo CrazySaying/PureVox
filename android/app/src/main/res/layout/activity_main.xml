@@ -79,6 +79,37 @@
                 android:textAllCaps="false" />
         </LinearLayout>
 
+        <!--
+          「重新发现」与「重新连接」是**两件事**，所以是两个按钮（DESIGN.md §4.1.1）：
+            重新发现 = 换了 Wi-Fi / 刚才没搜到 → 停掉 NsdManager 再 discover（要等几秒）
+            重新连接 = 只是掉线、服务还在    → 只重连 WebSocket（立刻就好）
+          分开是为了让用户在正确的时机做正确的事：只是掉线却去重新发现，会白等那几秒。
+          电脑上没跑服务时搜不到是**预期行为**，所以这两个按钮任何时候都可用。
+        -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/btnRediscover"
+                style="@style/Widget.Material3.Button.TextButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/btn_rediscover"
+                android:textAllCaps="false" />
+
+            <Button
+                android:id="@+id/btnReconnect"
+                style="@style/Widget.Material3.Button.TextButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/btn_reconnect"
+                android:textAllCaps="false" />
+        </LinearLayout>
+
         <Button
             android:id="@+id/btnHealth"
             style="@style/Widget.Material3.Button.TextButton"
