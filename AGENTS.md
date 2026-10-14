@@ -273,9 +273,10 @@ release 构建同样保留（不允许用编译开关剔除）。
   `RegisterHotKey` + 规范串「`Ctrl+Alt+Shift+Win` 顺序」，空串=不监听，注册结果进 `ui`）；
   **提示音**（`cues.rs` 自合成 6 套预设，start 上行 / stop 下行，`PlaySound` SND_MEMORY）；
   **设置**（`~/.purevox/settings.json`：语言 / 热键 / 提示音；顶栏「设置」面板，键位可录制）；
-  中英文（`ui/i18n.js`，中文即 msgid，顶栏「EN/中」）。应用图标 `icons/` 由
-  `tools/automation/gen_icons.{ps1,sh}` 生成（**不参与 CI**，一次性生成、产物入库；P 的矢量
-  定义与改法见 TAURI3.md §3.5.1）。打包用 `cargo tauri build`。
+  中英文（`ui/i18n.js`，中文即 msgid，顶栏「EN/中」）。应用图标 `icons/` 与 Android 的
+  `res/mipmap-*` 由 `tools/automation/gen_icons.py` 生成（**不参与 CI**，一次性生成、产物入库；
+  跨平台同一条命令、产物逐字节相同；P 的矢量定义与改法见 TAURI3.md §3.5.1）。打包用
+  `cargo tauri build`。
 
 ---
 

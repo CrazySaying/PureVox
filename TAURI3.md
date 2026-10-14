@@ -271,7 +271,7 @@ cargo install tauri-cli --version "^3.0.0-alpha" --locked   # 约 2.5 分钟，�
 | `src-tauri/tauri.conf.json` | 应用配置；`build.frontendDist` 指向 `ui`，无 dev server |
 | `src-tauri/capabilities/default.json` | 权限：主窗口 `core:default` |
 | `src-tauri/ui/` | 前端（纯静态，`withGlobalTauri` 下用 `window.__TAURI__.core.invoke`）：`index.html` + 调试面板 `debug.js` / `debug.css` |
-| `src-tauri/icons/` | 由 `tools/automation/gen_icons.ps1`（Windows）/ `gen_icons.sh`（Linux）生成，见 3.5.1 |
+| `src-tauri/icons/` | 由 `tools/automation/gen_icons.py` 生成（跨平台同一条命令），见 3.5.1 |
 
 Tauri 3 与 2 在骨架上唯一的差别：`main` 里必须 `.runtime(tauri_runtime_wry::Wry::default())`，
 且 Cargo.toml 直接依赖 `tauri-runtime-wry`。
@@ -291,21 +291,33 @@ Tauri 3 与 2 在骨架上唯一的差别：`main` 里必须 `.runtime(tauri_run
 ### 3.5.1 图标生成（**不参与 CI**）
 
 图标是**一次性生成、产物入库**的静态资源：CI 里不重新生成（AGENTS §2.7 的门禁与打包都不碰
-它），改设计时开发者本地跑一次脚本，把产物提交上去即可。理由是它需要 ImageMagick（Linux）
-或 System.Drawing（Windows）这类宿主能力，而打包根本不需要图像库——放进 CI 只会多一个
-「CI 能跑、本地跑不了」的分叉点。
+它），改设计时开发者本地跑一次脚本，把产物提交上去即可。理由是它需要 Pillow 这个宿主能力，
+而打包根本不需要图像库——放进 CI 只会多一个「CI 能跑、本地跑不了」的分叉点。
 
-| 平台 | 命令 | 依赖 |
-| --- | --- | --- |
-| Windows | `pwsh tools\automation\gen_icons.ps1` | 无（System.Drawing 自带） |
-| Linux | `tools/automation/gen_icons.sh` | ImageMagick（`magick` 或 `convert`） |
+```text
+python tools/automation/gen_icons.py            # 全量（Windows / Linux / macOS 同一条命令）
+python tools/automation/gen_icons.py -Compare   # 只比对形状，不写文件
+python tools/automation/gen_icons.py -Skip Android,Ios
+python tools/automation/gen_icons.py -Out /tmp/x # 试跑：输出到 /tmp/x，一个字节都不碰仓库
+```
 
-两个脚本共用**同一套 P 的矢量定义**（各自文件顶部的 `$PBoxes` / `P_BOXES`），所以设计一致。
+依赖：`pip install pillow`。仅本机一次性使用，CI 不需要（产物已入库）。
 
-**产物不保证逐字节相同**：两个脚本分属两个图像库（GDI+ vs ImageMagick），渐变抖动、抗锯齿、
-降采样滤波器都不同，实测同尺寸像素差 50~90%。它们保证的是**视觉一致**（同样的大小、位置、
-配色、4× 超采样圆边）；要在 Windows 上出包就用 `.ps1` 的产物，那份是 `include_bytes!` 进
-exe 的最终版。
+**只有这一份实现。** 此前是 `gen_icons.ps1`（GDI+）与 `gen_icons.sh`（ImageMagick）两份，
+共用同一套盒子定义，但两个图像库的渐变抖动、抗锯齿、降采样滤波器都不同，**实测同尺寸
+像素差 50~90%** —— 两台机器生成的图标长得不一样，「一个功能只有一条实现路径」就是句空话。
+现在同一条命令在三个平台跑出**逐字节相同**的产物。
+
+顺带一个好处：Pillow 的渐变是逐行连续插值，而 `LinearGradientBrush` 默认**开抖动**（往渐变里
+掺噪点防条带）。所以同一张 1024px 的 macOS 图标，GDI+ 版 49 KB、Pillow 版 9 KB —— 更小
+且没有抖动噪点。
+
+`-Out` 必须**完全隔离**：桌面图标与 Android 图标一起搬过去，一个字节都不碰仓库。之前
+Android 那段写死了仓库路径，于是「试跑到临时目录」反而把仓库里的 `mipmap-*` 覆盖了 ——
+生成脚本半隔离比不隔离更危险。
+
+**Android 的图标不进 `src-tauri/icons/`**：那里曾放 `cargo tauri icon` 的产物，现已删除
+（见 AGENTS §2.5）。脚本直接写到 `android/app/src/main/res/mipmap-*`。
 
 **P 是四个直角盒子，不是字体**
 
