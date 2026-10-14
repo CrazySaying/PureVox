@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  PureVox — AI 麦克风降噪工具
+  Copyright (C) 2024-2026 a2heng <752848283@qq.com>
+
+  PureVox is licensed under the GNU General Public License v3.0 or
+  later (GPL-3.0-or-later).  See LICENSE for details.
+
+  This program is free software: you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation, either version 3 of the License, or
+  (at your option) any later version.
+
+  The built-in AI models are NOT covered by the GPL; they are the
+  property of a2heng and may only be used with PureVox under
+  authorization.  See MODEL-LICENSE.md for details.
+
+  SPDX-License-Identifier: GPL-3.0-or-later
+-->
+<!--
+  自适应图标的**背景层**：满幅竖向渐变，**不能带圆角**。
+
+  色值量自 src-tauri/icons/icon.png 与 cargo tauri icon 生成的
+  mipmap-*/ic_launcher_foreground.png（P 两处独立实测一致）。
+
+  为什么不是纯色：`cargo tauri icon` 从 `audio_icon_base.png` 提取主色填
+  ic_launcher_background，源图是**透明底**的 P，提取不到主色就退回 `#FFFFFF`。
+  于是 Android 8+ 上系统把前景裁成圆形/squircle 时，四个圆角外的透明区会露出
+  **白底**——图标变成「白底 + 一个圆角深蓝方块」，很难看。
+
+  而前景层（ic_launcher_foreground.png）的圆角底**本身是这条渐变**，四角之外是透明。
+  背景层给同一条渐变之后，裁切处两边同色同位置，接缝看不出来，图标看起来就是一块
+  完整的渐变底 + P。
+
+  三个色标点而不是两个：实测渐变略带非线性（线性中段偏低约 6/255），中间加一个点
+  逼近，肉眼完全无差。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path android:pathData="M0,0h108v108h-108z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="0" android:startY="0"
+                android:endX="0" android:endY="108">
+                <item android:offset="0" android:color="#102F5D" />
+                <item android:offset="1" android:color="#1E6FD0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+</vector>

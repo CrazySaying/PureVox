@@ -271,7 +271,7 @@ cargo install tauri-cli --version "^3.0.0-alpha" --locked   # 约 2.5 分钟，�
 | `src-tauri/tauri.conf.json` | 应用配置；`build.frontendDist` 指向 `ui`，无 dev server |
 | `src-tauri/capabilities/default.json` | 权限：主窗口 `core:default` |
 | `src-tauri/ui/` | 前端（纯静态，`withGlobalTauri` 下用 `window.__TAURI__.core.invoke`）：`index.html` + 调试面板 `debug.js` / `debug.css` |
-| `src-tauri/icons/` | 由 `assets/icons/audio_icon_base.png` 经 `cargo tauri icon` 生成，只保留配置引用的 5 个文件 |
+| `src-tauri/icons/` | 由 `tools/automation/gen_icons.ps1`（Windows）/ `gen_icons.sh`（Linux）生成，见 3.5.1 |
 
 Tauri 3 与 2 在骨架上唯一的差别：`main` 里必须 `.runtime(tauri_runtime_wry::Wry::default())`，
 且 Cargo.toml 直接依赖 `tauri-runtime-wry`。
@@ -283,12 +283,85 @@ Tauri 3 与 2 在骨架上唯一的差别：`main` 里必须 `.runtime(tauri_run
 | `cargo build` | 首次约 1 分钟，产出 `target/debug/purevox.exe` |
 | `cargo tauri dev` | 编译并运行开发版 |
 | `cargo tauri build` | release 版 + 两个安装包：`target/release/bundle/msi/PureVox_0.1.0_x64_en-US.msi`（2.9 MB）与 `target/release/bundle/nsis/PureVox_0.1.0_x64-setup.exe`（2.0 MB）；裸 exe 8.4 MB |
-| `cargo tauri icon <png>` | 从一张方形 PNG 生成全套图标 |
 
 `cargo tauri build` 首次会从 GitHub 下载 WiX 与 NSIS 工具（tauri-apps/binary-releases），需要能访问 GitHub。
 
-图标：`icons/` 由 `cargo tauri icon <源图.png>` 从一张 1024 方形源图生成（PureVox 源图为深蓝渐变圆角方块 +
-白色「PureVox」字样），窗口 / 托盘 / 安装包共用同一套；源图改设计后重跑该命令即可。
+图标见下面 3.5.1。
+
+### 3.5.1 图标生成（**不参与 CI**）
+
+图标是**一次性生成、产物入库**的静态资源：CI 里不重新生成（AGENTS §2.7 的门禁与打包都不碰
+它），改设计时开发者本地跑一次脚本，把产物提交上去即可。理由是它需要 ImageMagick（Linux）
+或 System.Drawing（Windows）这类宿主能力，而打包根本不需要图像库——放进 CI 只会多一个
+「CI 能跑、本地跑不了」的分叉点。
+
+| 平台 | 命令 | 依赖 |
+| --- | --- | --- |
+| Windows | `pwsh tools\automation\gen_icons.ps1` | 无（System.Drawing 自带） |
+| Linux | `tools/automation/gen_icons.sh` | ImageMagick（`magick` 或 `convert`） |
+
+两个脚本共用**同一套 P 的矢量定义**（各自文件顶部的 `$PBoxes` / `P_BOXES`），所以设计一致。
+
+**产物不保证逐字节相同**：两个脚本分属两个图像库（GDI+ vs ImageMagick），渐变抖动、抗锯齿、
+降采样滤波器都不同，实测同尺寸像素差 50~90%。它们保证的是**视觉一致**（同样的大小、位置、
+配色、4× 超采样圆边）；要在 Windows 上出包就用 `.ps1` 的产物，那份是 `include_bytes!` 进
+exe 的最终版。
+
+**P 是四个直角盒子，不是字体**
+
+```text
+上横  x 120..336  y  54..107      左竖  x 120..173  y  54..488
+右竖  x 338..391  y 109..270      中横  x 120..336  y 272..325
+描边 = 每个盒子向外扩 30px（方形外扩）    含描边包围盒 332×495
+```
+
+坐标是 512 画布上的绝对像素，逐像素量自旧源图。**改设计就是改这四个盒子加描边宽度。**
+
+早期版本走 ark-pixel 像素字体渲染（legacy `tools/gen_lite_tray_icon.py` 的托盘黄 P），现已
+弃用，三个理由：
+
+1. 字体只在**只读快照**里（AGENTS §2.3 / §2.5），现役树不该依赖它；
+2. PIL / GDI+ / FreeType 的**字形度量各不相同**（同一参数实测差 8%），同一份代码在不同平台
+   会画出不同的 P —— 对「跨平台同款图标」是硬伤；
+3. P 本身是直角几何图形，矢量描述比「先渲染成字形再缩放」更准也更省。
+
+**相对旧源图的两处修正**：P 改为居中（旧图垂直偏下约 15px）；描边末端不再被画布切掉（旧图
+画布 512 高而 P 含描边高 495、底边在 y=518，底部 7px 是平的）。所以与旧图的形状 IoU 约 90%，
+差异集中在边界 1px（旧的字体扩散带抗锯齿，新的矢量是实边），肉眼不可见。
+
+**圆边为什么要超采样**：直接按目标尺寸画圆，圆周就是一圈台阶（mdpi 48px 上尤其明显）。
+两个脚本都是 **4× 超采样画完再降采样**，圆边是多像素灰阶过渡，观感是平滑弧线。
+
+**产出**
+
+| 位置 | 内容 |
+| --- | --- |
+| `src-tauri/icons/audio_icon_base.png` | 源图（512 透明底 P） |
+| `src-tauri/icons/{32x32,64x64,128x128,128x128@2x,icon.png}` + `icon.ico`（16/24/32/48/64/128/256） | 打包用（`tauri.conf.json` 的 `bundle.icon`） |
+| `src-tauri/icons/Square{30,44,71,89,107,142,150,284,310}x…Logo.png` + `StoreLogo.png` | Windows Store |
+| `src-tauri/icons/icon.icns`（icp4…ic10） | macOS（配置引用，但本项目不打包 macOS） |
+| `src-tauri/icons/ios/AppIcon.appiconset/` | iOS 的 20 个槽位 + `Contents.json`（见下） |
+| `src-tauri/icons/tray_running.png` / `tray_stopped.png` | 托盘 64px。**运行态 = 蓝渐变底 + 浅蓝 P；停止态 = 暗灰底 + 暗蓝 P** —— 整套一起压暗才有「熄灭」的观感，只压底色的话 P 仍是亮蓝，在暗灰底上比运行时还跳，一眼看不出停了（AGENTS §1.2 托盘）。P 高占 72%：64px 下再小就看不清 |
+| `android/app/src/main/res/mipmap-*/` | 五档密度 × `ic_launcher` / `_round` / `_foreground` |
+| `android/app/src/main/res/drawable/ic_launcher_bg.xml` | 自适应图标背景层（深蓝竖向渐变，满幅无圆角） |
+
+**Android 自适应图标为什么不是 `cargo tauri icon` 那套**：它从透明底源图取不到主色，
+`ic_launcher_background` 被填成 `#FFFFFF`；而前景层是带圆角底的整图，四角透明——系统一裁就露出
+白底，图标变成「白底 + 一个圆角深蓝方块」。这里改成标准两层：背景是**同一条渐变**的矢量，
+前景只有安全区里的 P，裁切处两边同色同位置，接缝看不出来。
+
+#### iOS：必须是 appiconset，不是裸 PNG
+
+`icons/ios/AppIcon.appiconset/` 下是 20 个槽位 + `Contents.json`。**没有这个索引文件，Xcode 根本
+不认这套图标**——早先这里放的是 `cargo tauri icon` 留下的裸 PNG，形状对但结构不对，等于废图。
+
+同一物理尺寸在不同 idiom 下是**同一个文件**（20x20@2x 的 iPhone 与 iPad 都是 40px），只有 iPad
+独有的槽位才另起 `~ipad` 文件。旧图里那几个 `AppIcon-{20x20,29x29,40x40}@2x-1.png` 是
+`cargo tauri icon` 自己的 iPad 命名 —— 既不是 Xcode 约定，内容又和各自的 `@2x` **完全相同**
+（同一尺寸而已），属重复文件，已随结构重建一并消失。
+
+本项目**不做 iOS**（CI 只有 Windows / Linux / Android），所以这套图标目前只是备着；真要做 iOS，
+`Contents.json` 已经是标准结构，直接可用。
 
 ### 3.6 自动化验证的坑
 

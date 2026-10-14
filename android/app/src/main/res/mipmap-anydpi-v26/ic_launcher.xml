@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 由 tools/automation/gen_icons.sh|.ps1 生成的启动图标。背景是桌面版同款深蓝竖向渐变（
+         满幅无圆角，系统自己裁形状）；前景 P 落在中央安全区。 -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+  <foreground android:drawable="@mipmap/ic_launcher_foreground"/>
+  <background android:drawable="@drawable/ic_launcher_bg"/>
+</adaptive-icon>

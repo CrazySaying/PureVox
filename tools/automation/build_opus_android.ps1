@@ -1,4 +1,4 @@
-# PureVox — AI 麦克风降噪工具
+﻿# PureVox — AI 麦克风降噪工具
 # Copyright (C) 2024-2026 a2heng <752848283@qq.com>
 #
 # PureVox is licensed under the GNU General Public License v3.0 or
