@@ -220,6 +220,15 @@ function Save-Png($Bmp, [string]$Path) {
 # 容器打包：.ico / .icns
 # --------------------------------------------------------------------------
 
+# BinaryWriter.Write 有几十个重载，**PowerShell 5.1 的重载解析对 byte[] 会挑 Write(SByte)**
+# （把数组当单值强转），结果是每个条目只写出 1 个字节 —— 不报错、文件照样生成，只是内容是坏的
+# （icon.ico 只有 125 字节、Windows 资源编译器直接报 RC2176 "old DIB"）。必须走
+# Write(byte[], int, int) 这个**唯一无歧义**的重载。
+function Write-Bytes($Bw, [byte[]]$Data) {
+    if ($null -eq $Data -or $Data.Length -eq 0) { throw 'Write-Bytes 收到空数据（生成器返回了 null？）' }
+    $Bw.Write($Data, 0, $Data.Length)
+}
+
 <#
     Windows .ico：ICONDIR + ICONDIRENTRY[] + 各尺寸 PNG。
     条目里的宽高是**单字节**，256 编码成 0。
@@ -239,10 +248,16 @@ function Write-Ico([string]$Path, [int[]]$Sizes, [scriptblock]$Make) {
         $bw.Write([uint32]$imgs[$i].Length); $bw.Write([uint32]$offset)
         $offset += $imgs[$i].Length
     }
-    foreach ($b in $imgs) { $bw.Write($b) }
+    foreach ($b in $imgs) { Write-Bytes $bw $b }
     $bw.Flush()
-    [IO.File]::WriteAllBytes($Path, $ms.ToArray())
+    $bytes = $ms.ToArray()
     $ms.Dispose()
+    # 自检：目录里登记的最后一个条目结束位置必须正好等于文件长度。不等就是上面那个坑复发，
+    # 写出来的容器看着像模像样、实际截断 —— 让它当场炸，别等 Windows 资源编译器来报错。
+    if ($bytes.Length -ne $offset) {
+        throw "ICO 长度不符：目录声称 $offset 字节，实际写出 $($bytes.Length) 字节（$Path）"
+    }
+    [IO.File]::WriteAllBytes($Path, $bytes)
 }
 
 <#
@@ -252,21 +267,27 @@ function Write-Ico([string]$Path, [int[]]$Sizes, [scriptblock]$Make) {
 function Write-Icns([string]$Path, $TypeMap, [scriptblock]$Make) {
     $ms = New-Object System.IO.MemoryStream
     $bw = New-Object System.IO.BinaryWriter($ms)
-    $bw.Write([System.Text.Encoding]::ASCII.GetBytes('icns'))
-    $bw.Write([uint32]0)
+    Write-Bytes $bw ([System.Text.Encoding]::ASCII.GetBytes('icns'))
     $blocks = @()
     foreach ($k in $TypeMap.Keys) { $blocks += , @($k, (& $Make $TypeMap[$k])) }
+    # 头 = 'icns'(4) + 总长(4) = 8，之后每块 = 类型(4) + 块长(含这 8)(4) + 数据。
+    # 总长字段写的是**整个文件的长度**（不是块数、也不是不含头）。
     $total = 8
     foreach ($b in $blocks) { $total += 8 + $b[1].Length }
     $bw.Write([uint32]$total)
     foreach ($b in $blocks) {
-        $bw.Write([System.Text.Encoding]::ASCII.GetBytes([string]$b[0]))
+        Write-Bytes $bw ([System.Text.Encoding]::ASCII.GetBytes([string]$b[0]))
         $bw.Write([uint32](8 + $b[1].Length))
-        $bw.Write($b[1])
+        Write-Bytes $bw $b[1]
     }
     $bw.Flush()
-    [IO.File]::WriteAllBytes($Path, $ms.ToArray())
+    $bytes = $ms.ToArray()
     $ms.Dispose()
+    # 与 ICO 同理：'icns' 头里登记的总长必须正好等于文件长度
+    if ($bytes.Length -ne $total) {
+        throw "ICNS 长度不符：头部声称 $total 字节，实际写出 $($bytes.Length) 字节（$Path）"
+    }
+    [IO.File]::WriteAllBytes($Path, $bytes)
 }
 
 function Get-PngBytes($Bmp) {

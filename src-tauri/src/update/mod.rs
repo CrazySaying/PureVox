@@ -295,16 +295,28 @@ pub async fn check() -> Result<Status, String> {
       s.phase = Phase::Idle;
       s.reason = "开发构建（无 CI 版本戳），不判断更新".into();
     } else {
-      match (
-        version::parse_stamp(version::STAMP),
-        version::parse_stamp(&latest_stamp),
-      ) {
-        (Some(mine), Some(theirs)) if theirs > mine => s.phase = Phase::Available,
-        _ => s.phase = Phase::UpToDate,
-      }
+      s.phase = decide(version::STAMP, &latest_stamp);
     }
   });
   Ok(status())
+}
+
+/// 更新判定（**纯函数，不碰网络**）：本机构建戳 vs 最新 release 的 tag 戳 → 阶段。
+///
+/// 抽出来的理由：这段判定原先埋在 [`check`] 的状态闭包里，**只有联网跑完整条链路才覆盖得到**
+/// ——而 CI 不该、也做不到去 GitHub 真查一次。抽成纯函数后，`cargo test` 就能把
+/// 「同日多次发版靠时分区分」「本机更新时不应提示」这两条最容易错的地方钉死。
+///
+/// `mine` 为空串（开发构建）时 `parse_stamp` 返回 None → 落到 `UpToDate`；调用方必须
+/// **先判 `version::is_dev()` 再调本函数**（`Idle` + 明确原因，别拿 Cargo 回退的 0.1.0 去比）。
+fn decide(mine_stamp: &str, latest_stamp: &str) -> Phase {
+  match (
+    version::parse_stamp(mine_stamp),
+    version::parse_stamp(latest_stamp),
+  ) {
+    (Some(mine), Some(theirs)) if theirs > mine => Phase::Available,
+    _ => Phase::UpToDate,
+  }
 }
 
 /// 共享 HTTP 客户端（超时收紧到 15 s：更新检查不能拖住界面）。
@@ -450,36 +462,55 @@ mod tests {
       tag_to_stamp("v2026.10.12.1430").as_deref(),
       Some("2026.10.12.1430")
     );
+    // 没有 v 前缀也认（有人手工建 tag 会漏 v）
     assert_eq!(
       tag_to_stamp("2026.10.12.1430").as_deref(),
       Some("2026.10.12.1430")
     );
     assert_eq!(tag_to_stamp("v1.2.3"), None, "段数不对必须拒绝");
-    assert_eq!(tag_to_stamp("v2026.13.12.1430"), None);
+    assert_eq!(tag_to_stamp("v26.10.8"), None, "两段是显示版本，不是构建戳");
+    assert_eq!(tag_to_stamp("v2026.13.12.1430"), None, "13 月非法");
   }
 
   #[test]
   fn stamp_to_version_matches_version_script_mapping() {
-    // 与 tools/automation/version.sh 的 major=年-2000 / minor=月 / build=日 一致
+    // 与 tools/automation/version.sh 的 major=年-2000 / minor=月 / build=日 一致。
+    // 月/日都按整数取值再拼，故 09 月打成 9；版本脚本那边用 10# 去前导零
+    // （bash 会把 09 当八进制），两边必须逐字相同 —— 版本检测的门禁就在这儿。
     assert_eq!(stamp_to_version("2026.10.08.1430"), "26.10.8");
     assert_eq!(stamp_to_version("2026.09.30.1944"), "26.9.30");
-    assert_eq!(stamp_to_version("bad"), "bad");
+    assert_eq!(stamp_to_version("2026.09.09.0901"), "26.9.9");
+    assert_eq!(stamp_to_version("2026.01.02.0000"), "26.1.2");
+    assert_eq!(
+      stamp_to_version("bad"),
+      "bad",
+      "认不出来就原样返回，不编一个版本号"
+    );
   }
 
   #[test]
   fn pick_asset_prefers_this_platform_then_falls_back() {
-    // 产物名只看后缀（版本号同日会重复，见 version.rs）
-    let assets = vec![
-      asset("PureVox-26.10.12-windows-x64.msi"),
-      asset("PureVox-26.10.12-windows-x64-setup.exe"),
-      asset("PureVox-Android-26.10.12-arm64.apk"),
-    ];
-    let (name, url, size) = pick_asset(&assets).expect("应匹配到本平台产物");
-    assert_eq!(name, "PureVox-26.10.12-windows-x64-setup.exe");
-    assert_eq!(
-      url,
-      "https://example.invalid/PureVox-26.10.12-windows-x64-setup.exe"
+    // 产物名按**本平台的**后缀构造，不能硬编码 Windows 产物名：ASSET_SUFFIXES 来自
+    // install_*.rs，是平台相关的（Windows 是 msi/setup.exe，Linux 是 AppImage/deb/rpm）。
+    // 写死 Windows 名字的话，Linux 上 pick_asset 一个都匹配不上直接 panic——
+    // 而 Windows 上永远绿。这类错只有真在 Linux 上跑一遍门禁才会暴露。
+    let suffixes: &[&str] = imp::ASSET_SUFFIXES;
+    assert!(
+      !suffixes.is_empty(),
+      "本平台至少要有一个可安装产物后缀，否则自动更新无从谈起"
     );
+    const V: &str = "26.10.12";
+    // 干扰项：本平台之外的产物（zip 谁都不是）
+    let mut assets = vec![asset(&format!("PureVox-{V}-other.tar.gz"))];
+    // 本平台的每个候选都塞进去，但**倒序**放：命中哪个只由 ASSET_SUFFIXES 的优先级决定
+    // （外层遍历 suffixes、内层 find assets），与清单里的先后无关。
+    for s in suffixes.iter().rev() {
+      assets.push(asset(&format!("PureVox-{V}-cand{s}")));
+    }
+    let (name, url, size) = pick_asset(&assets).expect("应匹配到本平台产物");
+    let want = format!("PureVox-{V}-cand{}", suffixes[0]);
+    assert_eq!(name, want, "应按 ASSET_SUFFIXES 的优先级选第一个");
+    assert_eq!(url, format!("https://example.invalid/{want}"));
     assert_eq!(size, 1024);
   }
 
@@ -498,5 +529,121 @@ mod tests {
     assert_eq!(j, "\"up_to_date\"");
     let j = serde_json::to_string(&Phase::Available).unwrap();
     assert_eq!(j, "\"available\"");
+  }
+
+  // ── 版本检测（不联网：`decide` 是纯函数，tag 往返是纯字符串处理）──
+
+  #[test]
+  fn decide_flags_only_strictly_newer_remote() {
+    // 同一个 tag → 已是最新（这条最要紧：发布完当天查一次不能反过来提示有更新）
+    assert_eq!(
+      decide("2026.10.14.1530", "2026.10.14.1530"),
+      Phase::UpToDate
+    );
+    // 远端更新
+    assert_eq!(
+      decide("2026.10.14.1530", "2026.10.14.1531"),
+      Phase::Available
+    );
+    assert_eq!(
+      decide("2026.10.14.1530", "2026.10.15.0900"),
+      Phase::Available
+    );
+    assert_eq!(
+      decide("2026.09.30.2359", "2026.10.01.0000"),
+      Phase::Available
+    );
+    // 远端更旧（本地是开发版以外的预发、或 release 被回退）→ 不提示
+    assert_eq!(
+      decide("2026.10.15.0900", "2026.10.14.1530"),
+      Phase::UpToDate
+    );
+    assert_eq!(
+      decide("2026.11.01.0000", "2026.10.31.2359"),
+      Phase::UpToDate
+    );
+  }
+
+  #[test]
+  fn decide_treats_same_day_releases_by_minutes() {
+    // 显示版本 yy.M.d 同一天会重复，靠 tag 的时分区分（version.rs 的存在理由），
+    // 所以判定必须按全序而不是按显示版本。
+    let early = "2026.10.14.0901";
+    let late = "2026.10.14.2309";
+    assert_eq!(decide(early, late), Phase::Available);
+    assert_eq!(decide(late, early), Phase::UpToDate);
+  }
+
+  #[test]
+  fn decide_survives_unparsable_stamps_without_panicking() {
+    // tag 格式不对 / 本机构建戳缺失：不能崩，也不能谎报「有更新」
+    assert_eq!(decide("2026.10.14.1530", "not-a-tag"), Phase::UpToDate);
+    assert_eq!(
+      decide("2026.10.14.1530", "v2026.10.14.1530"),
+      Phase::UpToDate
+    );
+    assert_eq!(decide("", "2026.10.14.1530"), Phase::UpToDate);
+  }
+
+  #[test]
+  fn release_tag_round_trips_to_the_artifact_version() {
+    // 闭环：tag → stamp → 显示版本，必须等于 CI 打进包里的那个 VERSION。
+    // 这条错了的表现是「界面上写 26.9.9、包名里却是 26.09.09」，用户升级时才看得见。
+    for (tag, want) in [
+      ("v2026.10.14.1530", "26.10.14"),
+      ("v2026.09.09.0901", "26.9.9"),
+      ("v2026.12.31.2359", "26.12.31"),
+    ] {
+      let stamp = tag_to_stamp(tag).expect("合法 tag 应能解析");
+      assert_eq!(stamp_to_version(&stamp), want, "tag {tag} 的显示版本往返");
+    }
+  }
+
+  #[test]
+  fn artifact_names_published_by_ci_carry_the_tag_version() {
+    // release.yml 统一重命名成 `PureVox-<版本>-<平台>.<ext>`。这里对**全部五个平台**断言：
+    // 名字里的版本段必须等于「本次发布 tag 的戳还原出的显示版本」，否则界面上写 26.10.14、
+    // 包名里却是别的版本号，用户升级时才看得见。
+    let tag = "v2026.10.14.1530";
+    let want = stamp_to_version(&tag_to_stamp(tag).expect("合法 tag"));
+    assert_eq!(want, "26.10.14");
+    for platform in [
+      "-windows-x64.msi",
+      "-windows-x64-setup.exe",
+      "-linux-x86_64.AppImage",
+      "-linux-x86_64.deb",
+      "-linux-x86_64.rpm",
+      "-android-arm64.apk",
+    ] {
+      let name = format!("PureVox-{want}{platform}");
+      let stamped = name
+        .trim_end_matches(platform)
+        .strip_prefix("PureVox-")
+        .expect("产物名以 PureVox- 开头");
+      assert_eq!(stamped, want, "{platform} 的产物名版本段");
+      // 显示版本再过一次 stamp 还原不能变形（update 面板用它显示 latest_version）
+      assert_eq!(stamp_to_version("2026.10.14.1530"), stamped);
+    }
+  }
+
+  #[test]
+  fn every_platform_artifact_suffix_is_distinct() {
+    // 产物后缀是 pick_asset 的唯一依据（不看版本号），后缀重复/互为后缀会让
+    // 「挑到本平台产物」在某个平台上悄悄挑错——例：`.AppImage` 与 `Image`。
+    let all = [
+      "-windows-x64.msi",
+      "-windows-x64-setup.exe",
+      "-linux-x86_64.AppImage",
+      "-linux-x86_64.deb",
+      "-linux-x86_64.rpm",
+      "-android-arm64.apk",
+    ];
+    for a in all {
+      for b in all {
+        if a != b {
+          assert!(!a.ends_with(b), "后缀 {a} 会被 {b} 抢先命中");
+        }
+      }
+    }
   }
 }

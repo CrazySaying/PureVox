@@ -53,11 +53,8 @@ pub fn install(st: &Status) -> Result<String, String> {
   // 先写同目录临时名再 rename（同一文件系统内原子替换）
   let tmp = cur.with_extension("new");
   std::fs::copy(new, &tmp).map_err(|e| format!("写入新版本失败：{e}"))?;
-  std::fs::set_permissions(
-    &tmp,
-    std::fs::Permissions::from(std::os::unix::fs::PermissionsExt::from_mode(0o755)),
-  )
-  .map_err(|e| format!("设置可执行权限失败：{e}"))?;
+  std::fs::set_permissions(&tmp, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+    .map_err(|e| format!("设置可执行权限失败：{e}"))?;
   std::fs::rename(&tmp, &cur).map_err(|e| {
     let _ = std::fs::remove_file(&tmp);
     format!("替换当前 AppImage 失败：{e}")

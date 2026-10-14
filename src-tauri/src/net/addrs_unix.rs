@@ -59,8 +59,14 @@ pub fn enumerate() -> Vec<NetIface> {
       if ifa.ifa_flags as i32 & libc::IFF_LOOPBACK != 0 {
         continue;
       }
-      let ip =
-        Ipv4Addr::from((*ifa.ifa_addr as *const libc::sockaddr_in).sin_addr.s_addr).to_string();
+      // 两处坑，Windows 上编译不到（这边是 `addrs_windows.rs`），只有跑 Linux/macOS 才暴露：
+      // 1. `ifa_addr` 在 Linux 是 `*mut sockaddr`、macOS 是 `*const sockaddr`，而指针**不能**
+      //    一步 `as` 成另一种结构体（rustc E0605：as 只允许原始类型之间）——必须走 `.cast()`。
+      // 2. `sin_addr.s_addr` 是**网络字节序**存进内存的 32 位；`Ipv4Addr::from(u32)` 按
+      //    大端解释它，在小端机上等于把地址四段倒过来（192.168.1.5 会读成 5.1.168.192）。
+      //    `to_ne_bytes()` 直接按内存顺序取字节才是对的。
+      let sin = &*ifa.ifa_addr.cast::<libc::sockaddr_in>();
+      let ip = Ipv4Addr::from(sin.sin_addr.s_addr.to_ne_bytes()).to_string();
       if ip.starts_with("127.") || ip.starts_with("169.254.") {
         continue;
       }

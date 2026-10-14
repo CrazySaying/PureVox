@@ -82,6 +82,12 @@ jobs:
       - name: "Gate · test"
         run: ./tools/automation/check.ps1 -Gate test
 
+      # 版本号推导：version.ps1 / version.sh 是同一契约的两份实现（Windows / Linux 各一）。
+      # 放到两个平台都跑，各自校验「本平台的脚本能跑通」+「两份输出逐字节相同」——
+      # 只在一边跑的话，另一边那份漂移了要等它出包时才发现（表现是 Linux 包版本比 Windows 旧）。
+      - name: "Gate · version"
+        run: ./tools/automation/check.ps1 -Gate version
+
   ui:
     name: 界面检查（tsc + i18n）
     runs-on: ubuntu-latest
