@@ -40,6 +40,14 @@ import subprocess
 import sys
 from pathlib import Path
 
+# 必须在任何 print 之前把 stdout 改成 UTF-8（Windows CI runner 的默认是 cp1252，
+# 打中文会 UnicodeEncodeError —— 门禁跑完了却被编码错误判成失败）。
+# 同目录导入：脚本以 `python tools/automation/check.py` 调用时，脚本所在目录在 sys.path 上。
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _utf8  # noqa: E402  （刻意放在 path 注入之后）
+
+_utf8.force()
+
 ROOT = Path(__file__).resolve().parents[2]
 TAURI = ROOT / "src-tauri"
 UI = TAURI / "ui"

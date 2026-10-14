@@ -14,6 +14,8 @@ on:
 env:
   # linuxdeploy / appimagetool 需要 FUSE；CI 容器里没有，用解包运行模式。
   APPIMAGE_EXTRACT_AND_RUN: "1"
+  # 中文输出需要 UTF-8（Windows runner 的默认代码页是 cp1252），见 tests.yml 同处注释。
+  PYTHONIOENCODING: utf-8
 
 jobs:
   warm:

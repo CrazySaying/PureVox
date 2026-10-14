@@ -33,6 +33,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+# 中文输出必须先切 UTF-8（Windows CI runner 默认 cp1252），见 _utf8.py 的说明。
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _utf8  # noqa: E402
+
+_utf8.force()
+
 ROOT = Path(__file__).resolve().parents[2]
 
 # 产物清单跟着 release.yml 的重命名规则走（update 的 pick_asset 按后缀匹配这些产物）

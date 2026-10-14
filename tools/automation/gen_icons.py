@@ -49,6 +49,12 @@ import struct
 import sys
 from pathlib import Path
 
+# 中文输出必须先切 UTF-8（Windows 控制台 / CI runner 的代码页都不是 UTF-8），见 _utf8.py。
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _utf8  # noqa: E402
+
+_utf8.force()
+
 try:
     from PIL import Image, ImageDraw
 except ImportError:  # 给出可执行的补救，而不是 ImportError 栈

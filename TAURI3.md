@@ -438,6 +438,16 @@ Android 那段写死了仓库路径，于是「试跑到临时目录」反而把
     （apt）、rpm→`fedora:latest`（dnf）、AppImage→本机 `--appimage-extract`；断言可执行文件存在、
     模型 7/7、`ldd` 无缺失。容器运行时用 `docker`（GitHub runner 自带）；本机 `DOCKER=podman`。
 - **UI 字符串门禁** `tools/automation/i18n_lint.js`（`-Gate ui` 内）：规则见 AGENTS.md §4。
+- **Python 脚本输出编码**：`tools/automation/` 里的脚本大量打中文（门禁项名、报错原因、
+  产物清单），而 **Windows runner 的 Python 默认按控制台代码页 cp1252 输出** —— 一句
+  `print("门禁全部通过")` 就是 `UnicodeEncodeError`，而且是**门禁跑完了才炸**，看起来
+  像门禁本身不通过。本机控制台是 cp936/UTF-8，所以本地永远绿。因此每个会打中文的脚本
+  都要在 import 之后、任何 print 之前调 `_utf8.force()`（`tools/automation/_utf8.py`，
+  用 `errors="replace"` 免得子进程的 OEM 文本反过来把门禁弄崩）；三个 workflow 的 `env:`
+  里另有 `PYTHONIOENCODING: utf-8` 作双保险（但它只对 CI 有用，本机跑脚本时靠的是脚本
+  内部那次调用）。
+  **验证办法**：`PYTHONIOENCODING=cp1252 python tools/automation/check.py -Gate version`
+  —— 这正是 Python 决定 stdout 编码的环境变量，效果与 runner 上的 cp1252 控制台一致。
 
 ---
 

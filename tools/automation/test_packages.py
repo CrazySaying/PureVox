@@ -37,6 +37,12 @@ import sys
 import tempfile
 from pathlib import Path
 
+# 中文输出必须先切 UTF-8（Windows CI runner 默认 cp1252），见 _utf8.py 的说明。
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _utf8  # noqa: E402
+
+_utf8.force()
+
 ROOT = Path(__file__).resolve().parents[2]
 BUNDLE = ROOT / "src-tauri" / "target" / "release" / "bundle"
 

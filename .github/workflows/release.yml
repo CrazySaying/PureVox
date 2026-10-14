@@ -16,6 +16,9 @@ env:
   CARGO_TERM_COLOR: always
   # linuxdeploy / appimagetool 需要 FUSE；CI 容器里没有，用解包运行模式。
   APPIMAGE_EXTRACT_AND_RUN: "1"
+  # 脚本大量打中文，Windows runner 的 Python 默认按控制台代码页（cp1252）输出，
+  # 会 UnicodeEncodeError。双保险：脚本内部自己也 reconfigure（tools/automation/_utf8.py）。
+  PYTHONIOENCODING: utf-8
 
 jobs:
   # ---------------------------------------------------------------- Windows
