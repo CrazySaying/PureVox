@@ -4,7 +4,7 @@
 # 纪律（沿袭旧版）：
 #   - 缓存全部 restore-only，唯一写入者是 warm-cache.yml（也手动）；
 #   - 键与版本的唯一来源是 tools/automation/versions.env（本文件只组合，不硬编码版本）；
-#   - 门禁实现只有一处 tools/automation/check.ps1（跨平台 PowerShell，本机与 CI 同一份）；
+#   - 门禁实现只有一处 tools/automation/check.py（Python，跨平台唯一实现）；
 #   - legacy-v*/ 快照不参与 CI（AGENTS.md 维护准则 3）。
 name: 测试（只跑门禁，手动触发）
 
@@ -71,22 +71,22 @@ jobs:
             purevox-${{ runner.os }}-target-dbg-${{ env.CACHE_GEN }}-
 
       - name: "Gate · fmt"
-        run: ./tools/automation/check.ps1 -Gate fmt
+        run: python tools/automation/check.py -Gate fmt
 
       - name: "Gate · clippy"
-        run: ./tools/automation/check.ps1 -Gate clippy
+        run: python tools/automation/check.py -Gate clippy
 
       - name: "Gate · build"
-        run: ./tools/automation/check.ps1 -Gate build
+        run: python tools/automation/check.py -Gate build
 
       - name: "Gate · test"
-        run: ./tools/automation/check.ps1 -Gate test
+        run: python tools/automation/check.py -Gate test
 
-      # 版本号推导：version.ps1 / version.sh 是同一契约的两份实现（Windows / Linux 各一）。
-      # 放到两个平台都跑，各自校验「本平台的脚本能跑通」+「两份输出逐字节相同」——
-      # 只在一边跑的话，另一边那份漂移了要等它出包时才发现（表现是 Linux 包版本比 Windows 旧）。
+      # 版本号推导：version.py 是**唯一实现**（Windows / Linux 同一条命令）。
+      # 两个平台都跑，各自校验本平台的 Python 能把它跑通、且对同一批 tag 产出固定的值 ——
+      # 版本推导错了，表现是包名/文件名里的日期不对，要等用户装上才发现。
       - name: "Gate · version"
-        run: ./tools/automation/check.ps1 -Gate version
+        run: python tools/automation/check.py -Gate version
 
   ui:
     name: 界面检查（tsc + i18n）
@@ -112,4 +112,4 @@ jobs:
         run: npm install -g "typescript@$env:TS_VER"
 
       - name: "Gate · ui (tsc + i18n_lint)"
-        run: ./tools/automation/check.ps1 -Gate ui
+        run: python tools/automation/check.py -Gate ui

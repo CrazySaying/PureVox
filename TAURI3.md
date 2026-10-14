@@ -25,7 +25,7 @@
   丢弃 0、流错误 0，伺服修正量约 ±300 ppm 内；回环采回频谱峰值 1000 Hz @ -20 dB。
 - CI 与发版流水线已建立（2026-10-07，见 §3.7）：`tests.yml`（门禁）/ `warm-cache.yml`（唯一缓存写入者）/
   `release.yml`（tag → 门禁 → 打包 → `assert_bundle -Smoke` 安装冒烟（7 模型布局）→ gh release）；
-  门禁与断言脚本集中在 `tools/automation/`，本机与 CI 跑同一份 `check.ps1`。
+  门禁与断言脚本集中在 `tools/automation/`，本机与 CI 跑同一份 `check.py`。
 - **网络（手机 ⇄ 电脑）已实现**（2026-10-08，DESIGN.md §4.1）：axum WebSocket 服务（端口
   59123，`/ws` + `/health`）。`remote_mic` 输入行（手机麦克风→电脑，**不需要虚拟声卡驱动**，
   进引擎全链可降噪）+ `remote_speaker` 输出行（电脑→手机扬声器）+ 远程输入（手机输入法打字
@@ -53,7 +53,7 @@
   + `i18n_lint` 门禁（规则见 AGENTS.md §4）。
 - **Linux 已跑通并出包**（2026-10-08）：本机 Ubuntu 24.04（CI 用 `ubuntu-latest`）`cargo build` /
   `clippy -D warnings` / `test`（40 项全过）/ `cargo tauri build` 均通过，出 deb / rpm / AppImage；
-  `tools/automation/check.ps1` 改为跨平台（`$HOME/.cargo/bin`）。Windows 专有功能在其它平台给
+  `tools/automation/check.py` 跨平台（Windows / Linux / macOS 同一份）。Windows 专有功能在其它平台给
   **明确「不可用」**而不静默：全局热键（`RegisterHotKey`）、AEC 远端 WASAPI 回环（改填输入设备作参考）。
   Opus 改为运行时动态加载：Windows 载随包 `opus.dll`，Linux `dlopen` 系统 `libopus.so.0`
   （缺库时只有网络音频降级，其余正常）。
@@ -400,9 +400,15 @@ Android 那段写死了仓库路径，于是「试跑到临时目录」反而把
 
 - **触发纪律：没有任何分支推送 / PR 触发**（日常提交零成本）。`tests.yml`（只测试）只
   `workflow_dispatch`；`release.yml`（打包发版）tag `v*` 或手动；`warm-cache.yml`（唯一缓存写入者）只手动。
-- **门禁唯一实现** `tools/automation/check.ps1`（**跨平台 PowerShell**，Windows 与 Linux 跑同一份）：
+- **门禁唯一实现** `tools/automation/check.py`（**Python，跨平台唯一**，Windows / Linux / macOS 跑同一份）：
   `fmt`（rustfmt --check，缩进见 `src-tauri/rustfmt.toml`）/ `clippy`（`--all-targets -D warnings`）/
-  `build` / `test` / `ui`（`tsc -p ui/jsconfig.json --noEmit` + `i18n_lint.js`）。本机跑全量或 `-Gate <项>`。
+  `build` / `test` / `ui`（`tsc -p ui/jsconfig.json --noEmit` + `i18n_lint.js`）/
+  `version`（版本号推导，见 `version.py`）。本机跑全量或 `-Gate <项>`。
+  **为什么从 PowerShell 换成 Python**：门禁要跨三平台跑，而 pwsh 只有 Windows / Linux 装得像样
+  （CI runner 自带，本机还得自己单独装 —— 本机为跑门禁装 Microsoft 源还撞上 GPG key 签名
+  失败）；Python 三边都是系统自带，冷启动 ~20 ms（pwsh ~330 ms），且只用标准库、不用
+  `pip install`。两个 workflow 里的 `shell: pwsh` 也随之取消。同理 `version.py` /
+  `gen_icons.py` 也都是**单份 Python**，取代原先的 `.ps1` + `.sh` 双份。
 - **工作流** `.github/workflows/`：
   - `tests.yml`：手动 → Rust 门禁矩阵 `windows-latest` + `ubuntu-latest`；`ui` 门禁在 `ubuntu-latest`。
   - `warm-cache.yml`：**全仓库唯一缓存写入者**，手动；矩阵 Windows+Linux **冷构建**（不恢复 target 缓存）

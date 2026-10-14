@@ -2,7 +2,7 @@
 # Android（debug APK）。触发：推 tag `v*`（构建 + 建 release）或手动 `workflow_dispatch`
 # （只构建、不建 release）。**分支推送不触发**；代码门禁见 tests.yml（手动）。
 # 纪律：缓存 restore-only（唯一写入者 warm-cache.yml）；版本/键唯一来源
-# tools/automation/versions.env；门禁实现唯一 = tools/automation/check.ps1。
+# tools/automation/versions.env；门禁实现唯一 = tools/automation/check.py。
 # 注意 AGENTS.md 维护准则：CI 失败、从未生成 release 的 tag 必须删除
 # （git tag -d <tag> && git push origin :refs/tags/<tag>），否则会截断下个 tag 的提交记录。
 name: 打包发版（tag v* / 手动）
@@ -29,7 +29,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Set app version（tag / 日期）
-        run: ./tools/automation/version.ps1 | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        run: python tools/automation/version.py | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Load versions + cache keys (versions.env 是唯一来源)
         run: |
@@ -87,16 +87,16 @@ jobs:
         run: cargo install tauri-cli --version "$env:TCLI_VER" --locked
 
       - name: "Gate · fmt"
-        run: ./tools/automation/check.ps1 -Gate fmt
+        run: python tools/automation/check.py -Gate fmt
 
       - name: "Gate · clippy"
-        run: ./tools/automation/check.ps1 -Gate clippy
+        run: python tools/automation/check.py -Gate clippy
 
       - name: "Gate · build"
-        run: ./tools/automation/check.ps1 -Gate build
+        run: python tools/automation/check.py -Gate build
 
       - name: "Gate · test"
-        run: ./tools/automation/check.ps1 -Gate test
+        run: python tools/automation/check.py -Gate test
 
       - uses: actions/setup-node@v7
         with:
@@ -105,7 +105,7 @@ jobs:
       - name: "Gate · ui (tsc + i18n_lint)"
         run: |
           npm install -g "typescript@$env:TS_VER"
-          ./tools/automation/check.ps1 -Gate ui
+          python tools/automation/check.py -Gate ui
 
       - name: Build installers (cargo tauri build)
         working-directory: src-tauri
@@ -134,7 +134,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Set app version（tag / 日期）
-        run: ./tools/automation/version.ps1 | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        run: python tools/automation/version.py | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Load versions + cache keys (versions.env 是唯一来源)
         run: |
@@ -201,16 +201,16 @@ jobs:
         run: cargo install tauri-cli --version "$env:TCLI_VER" --locked
 
       - name: "Gate · fmt"
-        run: ./tools/automation/check.ps1 -Gate fmt
+        run: python tools/automation/check.py -Gate fmt
 
       - name: "Gate · clippy"
-        run: ./tools/automation/check.ps1 -Gate clippy
+        run: python tools/automation/check.py -Gate clippy
 
       - name: "Gate · build"
-        run: ./tools/automation/check.ps1 -Gate build
+        run: python tools/automation/check.py -Gate build
 
       - name: "Gate · test"
-        run: ./tools/automation/check.ps1 -Gate test
+        run: python tools/automation/check.py -Gate test
 
       - uses: actions/setup-node@v7
         with:
@@ -219,7 +219,7 @@ jobs:
       - name: "Gate · ui (tsc + i18n_lint)"
         run: |
           npm install -g "typescript@$env:TS_VER"
-          ./tools/automation/check.ps1 -Gate ui
+          python tools/automation/check.py -Gate ui
 
       - name: Build installers (cargo tauri build)
         working-directory: src-tauri
@@ -259,7 +259,7 @@ jobs:
 
       - name: Set app version（tag / 日期）
         shell: bash
-        run: bash tools/automation/version.sh >> "$GITHUB_ENV"
+        run: python3 tools/automation/version.py >> "$GITHUB_ENV"
 
       - uses: actions/setup-java@v4
         with:

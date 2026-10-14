@@ -325,7 +325,7 @@ release 构建同样保留（不允许用编译开关剔除）。
      现役图标是 `src-tauri/icons/`、界面用系统字体（不捆绑字体文件），与旧资产**无重复**。
 6. **发版 tag**：主线 `v<yyyy.MM.dd.HHmm>`。CI 失败、从未生成 release 的 tag 必须删除
    （`git tag -d <tag> && git push origin :refs/tags/<tag>`），否则会截断下一个 release 的提交记录。
-   **应用/包版本号 = 年.月.日**：由 `tools/automation/version.{sh,ps1}`（唯一实现）从 tag
+   **应用/包版本号 = 年.月.日**：由 `tools/automation/version.py`（唯一实现，跨平台）从 tag
    （或本机当前 UTC）推导。`yy.m.d` **只有三段**，因为 Tauri 要 semver 三段、MSI 的
    ProductVersion 限 major≤255 / minor≤255 / build≤65535（`2026.10.8` 直译会报
    `major number cannot be greater than 255`）。故映射为 **major = 年-2000、minor = 月、
@@ -339,9 +339,11 @@ release 构建同样保留（不允许用编译开关剔除）。
    - **触发纪律**：**没有任何分支推送 / PR 触发**。`tests.yml`（只测试、不打包）只
      `workflow_dispatch` 手动触发；`release.yml`（打包发版）由 tag `v*` 触发、也可手动；
      `warm-cache.yml`（唯一缓存写入者）也只手动。日常提交零成本，要验证就手动 dispatch 一次。
-   - 门禁唯一实现 = `tools/automation/check.ps1`（**跨平台 PowerShell**：`fmt` /
-     `clippy`（`-D warnings`）/ `build` / `test` / `ui`（`tsc` + `i18n_lint`））；
-     CI 与本机（Windows 与 Linux）跑同一份，按 `-Gate` 拆 step 便于定位日志。
+   - 门禁唯一实现 = `tools/automation/check.py`（**Python，跨平台唯一**：六道门禁 `fmt` /
+     `clippy`（`-D warnings`）/ `build` / `test` / `ui`（`tsc` + `i18n_lint`）/ `version`）。
+     选 Python 不选 PowerShell：门禁要跑 Windows / Linux / macOS 三边，pwsh 只有前两边装得像样
+     （CI runner 自带、本机还得自己搞），Python 三边都自带，冷启动 ~20 ms vs pwsh ~330 ms，
+     且只用标准库、不用 `pip install`。**CI 与本机跑同一份**（`-Gate` 拆 step 便于定位日志）。
    - 工作流（`.github/workflows/`）：
      - `tests.yml`：手动 → Rust 门禁矩阵 `windows-latest` + `ubuntu-latest`
        （fmt/clippy/build/test）、`ui` 门禁（`ubuntu-latest`：setup-node → `-Gate ui`）。**不打包**。
@@ -408,7 +410,7 @@ release 构建同样保留（不允许用编译开关剔除）。
   **其余中文一律不上屏**；不翻译的边界：注释、调试日志（`__pvDebug` / `ui_report` /
   `console`）、Rust 诊断文本（probe 的 reason 体，由变量拼接不经扫描）。**新增用户可见中文串
   必须同步加 en 条目**（漏了 en 就是漏译）。门禁 `tools/automation/i18n_lint.js`
-  （挂 `check.ps1 -Gate ui`）：E1 裸中文上屏、E2/E3 缺键、E4 占位符奇偶、E5 模板 id 重复、
+  （挂 `check.py -Gate ui`）：E1 裸中文上屏、E2/E3 缺键、E4 占位符奇偶、E5 模板 id 重复、
   E6 Rust 标签缺条目为错误；W1 孤儿键、W2 TPL 骨架与 Rust 源脱节为告警。
 - **README 双语**：中文 `README.md` + 英文 `README_EN.md`，结构变化时两处同步。
 

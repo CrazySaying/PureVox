@@ -83,9 +83,9 @@ jobs:
       # 冷构建 debug（不恢复 target 缓存）：clippy/build/test 覆盖 target/debug 全部工件。
       - name: Warm debug (clippy + build + test)
         run: |
-          ./tools/automation/check.ps1 -Gate clippy
-          ./tools/automation/check.ps1 -Gate build
-          ./tools/automation/check.ps1 -Gate test
+          python tools/automation/check.py -Gate clippy
+          python tools/automation/check.py -Gate build
+          python tools/automation/check.py -Gate test
 
       # 只预热 debug 目标（+ registry + tauri-cli）：release 目标不预热（release.yml 需要时自己冷编）。
       - name: Drop stale caches（同键先删，保证新缓存覆盖旧的）
