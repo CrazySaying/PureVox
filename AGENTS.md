@@ -135,7 +135,7 @@ release 构建同样保留（不允许用编译开关剔除）。
   - **Android 端 Opus = 内置 libopus，不用系统 MediaCodec**（§1.2 续）：`libpvopus.so`
     （`jniLibs/arm64-v8a/`，NDK 预编译入库，含 libopus 1.5.2 静态库 + `cpp/pv_opus.cpp`
     的 JNI 转发层；**Gradle 构建不需要 NDK**，CI 也不用装），重建走
-    `tools/automation/build_opus_android.ps1`。**原因**：Android 上**从来没有
+    `tools/automation/build_opus_android.py`。**原因**：Android 上**从来没有
     `audio/opus` 这个 mime**——系统 Opus codec 注册的是 `audio/raw` /
     `audio/ogg;codecs=opus` / `audio/webm;codecs=opus`，后两者只认容器封装，喂裸 Opus
     包会**照单全收并输出垃圾 PCM（听感满屏刺啦且不报错）**；想吃裸包就得自己实现
@@ -315,7 +315,7 @@ release 构建同样保留（不允许用编译开关剔除）。
    - **现役引用**：`server/opus.dll`（Windows 网络 Opus，运行时加载，见 §1.2）、
      `android/app/src/main/jniLibs/arm64-v8a/libpvopus.so`（Android 网络 Opus，内含
      libopus 1.5.2 静态库 + `android/app/src/main/cpp/pv_opus.cpp` 的 JNI 转发层，
-     NDK 预编译入库，**重建用 `tools/automation/build_opus_android.ps1`**）、
+     NDK 预编译入库，**重建用 `tools/automation/build_opus_android.py`**）、
      `android/app/src/main/cpp/third_party/opus/{include/*.h, arm64-v8a/libopus.a}`（同上，编译输入）、
      `android/gradle/wrapper/gradle-wrapper.jar`（Android 客户端构建，**勿替换**）、
      `assets/icons/audio_icon_base.png`（`cargo tauri icon` 源图）。
@@ -351,12 +351,12 @@ release 构建同样保留（不允许用编译开关剔除）。
        target，预热 debug 三门禁 + `cargo tauri build`，再 save 四个桶（cargo registry /
        target-debug / target-release / cargo-tauri binary；`continue-on-error`，同键已存在即成功）。
      - `release.yml`：tag `v*` 或手动 → 三平台并行：
-       **Windows**（门禁 + `cargo tauri build` + `assert_bundle.ps1 -Smoke` → MSI/NSIS）；
+       **Windows**（门禁 + `cargo tauri build` + `assert_bundle.py --smoke` → MSI/NSIS）；
        **Linux**（`ubuntu-latest`：装 WebKitGTK/ALSA/rpm 依赖 + 门禁 + `cargo tauri build` +
-       `assert_bundle_linux.sh --smoke` + `test_packages.sh`（deb→ubuntu / rpm→fedora 容器安装验证）→
+       `assert_bundle.py --smoke` + `test_packages.py`（deb→ubuntu / rpm→fedora 容器安装验证）→
        deb/rpm/AppImage）；
-       **Android**（JDK17 + `install_android_sdk.sh` + `./gradlew assembleDebug` → debug APK）。
-       tag 时再 `release_notes.ps1` 生成说明并 `gh release create` 附带全部产物；手动触发只打包、不建 release。
+       **Android**（JDK17 + `install_android_sdk.py` + `./gradlew assembleDebug` → debug APK）。
+       tag 时再 `release_notes.py` 生成说明并 `gh release create` 附带全部产物；手动触发只打包、不建 release。
        **没有 Lite 变体**（其遗留资产已收进只读快照 `legacy-v2026.09.30.1944/`，见 §2.5）。
    - **缓存纪律**：`tests.yml` / `release.yml` 只 restore、不写缓存；键为
      `purevox-<RUNNER_OS>-<桶>-<CACHE_GEN>-…`。缓存桶与全部版本（含 `JDK_VER` /

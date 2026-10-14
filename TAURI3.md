@@ -414,12 +414,12 @@ Android 那段写死了仓库路径，于是「试跑到临时目录」反而把
   - `warm-cache.yml`：**全仓库唯一缓存写入者**，手动；矩阵 Windows+Linux **冷构建**（不恢复 target 缓存）
     debug 三门禁 + `cargo tauri build`，再 save 四个桶（`continue-on-error`，同键已存在即视为成功）。
   - `release.yml`：tag `v*` 或手动 → 三平台并行：
-    - **Windows**：门禁 → `cargo tauri build` → `assert_bundle.ps1 -Smoke` → MSI/NSIS。
+    - **Windows**：门禁 → `cargo tauri build` → `assert_bundle.py --smoke` → MSI/NSIS。
     - **Linux**（`ubuntu-latest`）：装 WebKitGTK/ALSA/rpm 依赖 → 门禁 → `cargo tauri build` →
-      `assert_bundle_linux.sh --smoke` → `test_packages.sh`（deb→ubuntu / rpm→fedora 容器安装验证）→
+      `assert_bundle.py --smoke` → `test_packages.py`（deb→ubuntu / rpm→fedora 容器安装验证）→
       deb/rpm/AppImage。
-    - **Android**：JDK17 + `install_android_sdk.sh` + `./gradlew assembleDebug` → debug APK。
-    - tag 时 `release_notes.ps1`（上一 tag 区间）+ `gh release create` 附带全部产物；手动只打包、不建 release。
+    - **Android**：JDK17 + `install_android_sdk.py` + `./gradlew assembleDebug` → debug APK。
+    - tag 时 `release_notes.py`（上一 tag 区间）+ `gh release create` 附带全部产物；手动只打包、不建 release。
   - **没有 Lite 变体**（Lite 已取消；遗留资产已收进只读快照 `legacy-v2026.09.30.1944/`）。
 - **缓存纪律**：`tests.yml` / `release.yml` 全部 `actions/cache/restore`（无 save）；键与版本唯一来源 =
   `tools/automation/versions.env`（`CACHE_GEN` / `RUST_TOOLCHAIN` / `TCLI_VER` / `TS_VER` / `NODE_VER` /
@@ -428,12 +428,13 @@ Android 那段写死了仓库路径，于是「试跑到临时目录」反而把
   `…-cargo-…`（registry+git）、`…-target-dbg-…`、`…-target-rel-…`、`…-tauri-cli-<ver>`
   （`cargo-tauri`，未命中才 `cargo install tauri-cli --version 钉死`）。
   为什么集中写：GitHub 缓存按触发 ref 分域，各工作流各写各的只会堆出没人回读的重复条目（tag 上尤甚）。
-- **产物断言**：
-  - Windows `tools/automation/assert_bundle.ps1 -Smoke`：安装包 ≥ 40 MB → NSIS `/S /D=` 静默安装 →
-    校验 `models\*.onnx` 7/7 → 启动并轮询 `/debug` 就绪 → 杀进程清残留。
-  - Linux `tools/automation/assert_bundle_linux.sh [--smoke]`：deb ≥ 40 MB → `dpkg-deb -x` 解包 →
-    校验可执行文件与 `*.onnx` 7/7 → rpm / AppImage 存在性 → `--smoke` 时 xvfb 下启动轮询 `/debug`。
-  - 跨发行版 `tools/automation/test_packages.sh`（环境模拟）：容器里**真实安装**——deb→`ubuntu:24.04`
+- **产物断言**（`assert_bundle.py` 是入口，平台差异拆到 `_windows.py` / `_linux.py`，
+  见 AGENTS §4）：
+  - Windows：安装包 ≥ 40 MB → NSIS `/S /D=` 静默安装 → 校验 `models\*.onnx` 7/7 →
+    启动并轮询 `/debug` 就绪 → 杀进程清残留。
+  - Linux：deb ≥ 40 MB → `dpkg-deb -x` 解包 → 校验可执行文件与 `*.onnx` 7/7 →
+    rpm 必需 / AppImage best-effort → `--smoke` 时 xvfb 下启动轮询 `/debug`。
+  - 跨发行版 `tools/automation/test_packages.py`（环境模拟）：容器里**真实安装**——deb→`ubuntu:24.04`
     （apt）、rpm→`fedora:latest`（dnf）、AppImage→本机 `--appimage-extract`；断言可执行文件存在、
     模型 7/7、`ldd` 无缺失。容器运行时用 `docker`（GitHub runner 自带）；本机 `DOCKER=podman`。
 - **UI 字符串门禁** `tools/automation/i18n_lint.js`（`-Gate ui` 内）：规则见 AGENTS.md §4。

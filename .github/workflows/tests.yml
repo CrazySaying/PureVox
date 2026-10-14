@@ -21,20 +21,29 @@ jobs:
         os: [windows-latest, ubuntu-latest]
     defaults:
       run:
-        shell: pwsh
+        shell: bash
     steps:
       - uses: actions/checkout@v7
 
+      # 下面所有 step 都是 bash（原来整份用 pwsh，是「门禁脚本是 PowerShell」的历史包袱；
+      # 换成 check.py 之后就没有理由再依赖 pwsh 了）。Windows runner 上 bash 由 Git 自带。
       - name: Load versions + cache keys (versions.env 是唯一来源)
+        shell: bash
         run: |
-          $vars = @{}
-          Get-Content tools/automation/versions.env | Where-Object { $_ -match '^(\w+)=(.*)$' } | ForEach-Object {
-            $vars[$Matches[1]] = $Matches[2]
-            "$($Matches[1])=$($Matches[2])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          }
-          $lock = "${{ hashFiles('src-tauri/Cargo.lock') }}"
-          "CARGO_CACHE_KEY=purevox-$env:RUNNER_OS-cargo-$($vars['CACHE_GEN'])-$lock" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          "TARGET_DEBUG_KEY=purevox-$env:RUNNER_OS-target-dbg-$($vars['CACHE_GEN'])-$lock" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          # versions.env 是 KEY=VALUE，一行行喂给 GITHUB_ENV
+          # （原来这段是 PowerShell 的 Get-Content | Where-Object | ForEach-Object）。
+          while IFS= read -r line || [ -n "$line" ]; do
+            case "$line" in
+              ''|'#'*) continue ;;
+              *=*) printf '%s\n' "$line" >> "$GITHUB_ENV" ;;
+            esac
+          done < tools/automation/versions.env
+          # 缓存键 = 缓存代数 + Cargo.lock 哈希。唯一写入者是 warm-cache.yml。
+          lock="${{ hashFiles('src-tauri/Cargo.lock') }}"
+          {
+            printf 'CARGO_CACHE_KEY=purevox-%s-cargo-%s-%s\n' "$RUNNER_OS" "$CACHE_GEN" "$lock"
+            printf 'TARGET_DEBUG_KEY=purevox-%s-target-dbg-%s-%s\n' "$RUNNER_OS" "$CACHE_GEN" "$lock"
+          } >> "$GITHUB_ENV"
 
       # cpal 在 Linux 上要 ALSA 开发头（pkg-config 名字 `alsa`）；WebKitGTK 4.1 是 Tauri wry 运行时必需。
       - name: Install Linux system deps
@@ -47,9 +56,10 @@ jobs:
             libopus0 pkg-config file
 
       - name: Install Rust toolchain (rustfmt + clippy)
+        shell: bash
         run: |
-          rustup toolchain install "$env:RUST_TOOLCHAIN" --profile minimal --component rustfmt --component clippy
-          rustup default "$env:RUST_TOOLCHAIN"
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt --component clippy
+          rustup default "$RUST_TOOLCHAIN"
           rustc --version
 
       - name: Restore cargo registry (restore-only)
@@ -71,21 +81,26 @@ jobs:
             purevox-${{ runner.os }}-target-dbg-${{ env.CACHE_GEN }}-
 
       - name: "Gate · fmt"
+        shell: bash
         run: python tools/automation/check.py -Gate fmt
 
       - name: "Gate · clippy"
+        shell: bash
         run: python tools/automation/check.py -Gate clippy
 
       - name: "Gate · build"
+        shell: bash
         run: python tools/automation/check.py -Gate build
 
       - name: "Gate · test"
+        shell: bash
         run: python tools/automation/check.py -Gate test
 
       # 版本号推导：version.py 是**唯一实现**（Windows / Linux 同一条命令）。
       # 两个平台都跑，各自校验本平台的 Python 能把它跑通、且对同一批 tag 产出固定的值 ——
       # 版本推导错了，表现是包名/文件名里的日期不对，要等用户装上才发现。
       - name: "Gate · version"
+        shell: bash
         run: python tools/automation/check.py -Gate version
 
   ui:
@@ -93,15 +108,19 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        shell: pwsh
+        shell: bash
     steps:
       - uses: actions/checkout@v7
 
       - name: Load versions (versions.env 是唯一来源)
+        shell: bash
         run: |
-          Get-Content tools/automation/versions.env | Where-Object { $_ -match '^(\w+)=(.*)$' } | ForEach-Object {
-            "$($Matches[1])=$($Matches[2])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          }
+          while IFS= read -r line || [ -n "$line" ]; do
+            case "$line" in
+              ''|'#'*) continue ;;
+              *=*) printf '%s\n' "$line" >> "$GITHUB_ENV" ;;
+            esac
+          done < tools/automation/versions.env
 
       # 本仓库无 package.json，不设 setup-node 的 cache（缓存只由 warm-cache.yml 写）。
       - uses: actions/setup-node@v7
@@ -109,7 +128,9 @@ jobs:
           node-version: ${{ env.NODE_VER }}
 
       - name: Install TypeScript (版本钉死在 versions.env)
-        run: npm install -g "typescript@$env:TS_VER"
+        shell: bash
+        run: npm install -g "typescript@$TS_VER"
 
       - name: "Gate · ui (tsc + i18n_lint)"
+        shell: bash
         run: python tools/automation/check.py -Gate ui

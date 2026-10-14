@@ -28,21 +28,26 @@ jobs:
         os: [windows-latest, ubuntu-latest]
     defaults:
       run:
-        shell: pwsh
+        shell: bash
     steps:
       - uses: actions/checkout@v7
 
+      # 全部 bash（原来是 pwsh，见 tests.yml 同处注释）。Windows runner 上 bash 由 Git 自带。
       - name: Load versions + cache keys (versions.env 是唯一来源)
+        shell: bash
         run: |
-          $vars = @{}
-          Get-Content tools/automation/versions.env | Where-Object { $_ -match '^(\w+)=(.*)$' } | ForEach-Object {
-            $vars[$Matches[1]] = $Matches[2]
-            "$($Matches[1])=$($Matches[2])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          }
-          $lock = "${{ hashFiles('src-tauri/Cargo.lock') }}"
-          "CARGO_CACHE_KEY=purevox-$env:RUNNER_OS-cargo-$($vars['CACHE_GEN'])-$lock" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          "TARGET_DEBUG_KEY=purevox-$env:RUNNER_OS-target-dbg-$($vars['CACHE_GEN'])-$lock" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          "TAURI_CLI_KEY=purevox-$env:RUNNER_OS-tauri-cli-$($vars['TCLI_VER'])" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          while IFS= read -r line || [ -n "$line" ]; do
+            case "$line" in
+              ''|'#'*) continue ;;
+              *=*) printf '%s\n' "$line" >> "$GITHUB_ENV" ;;
+            esac
+          done < tools/automation/versions.env
+          lock="${{ hashFiles('src-tauri/Cargo.lock') }}"
+          {
+            printf 'CARGO_CACHE_KEY=purevox-%s-cargo-%s-%s\n' "$RUNNER_OS" "$CACHE_GEN" "$lock"
+            printf 'TARGET_DEBUG_KEY=purevox-%s-target-dbg-%s-%s\n' "$RUNNER_OS" "$CACHE_GEN" "$lock"
+            printf 'TAURI_CLI_KEY=purevox-%s-tauri-cli-%s\n' "$RUNNER_OS" "$TCLI_VER"
+          } >> "$GITHUB_ENV"
 
       # Tauri wry 运行时 (WebKitGTK 4.1) + cpal (ALSA) + 打 rpm 需要 rpmbuild。
       - name: Install Linux system deps
@@ -55,9 +60,10 @@ jobs:
             libopus0 pkg-config file rpm
 
       - name: Install Rust toolchain (rustfmt + clippy)
+        shell: bash
         run: |
-          rustup toolchain install "$env:RUST_TOOLCHAIN" --profile minimal --component rustfmt --component clippy
-          rustup default "$env:RUST_TOOLCHAIN"
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt --component clippy
+          rustup default "$RUST_TOOLCHAIN"
 
       - name: Restore cargo registry (restore-only)
         uses: actions/cache/restore@v6
@@ -78,10 +84,12 @@ jobs:
 
       - name: Install tauri-cli (仅缓存未命中时编译，版本钉死)
         if: steps.tcli.outputs.cache-hit != 'true'
-        run: cargo install tauri-cli --version "$env:TCLI_VER" --locked
+        shell: bash
+        run: cargo install tauri-cli --version "$TCLI_VER" --locked
 
       # 冷构建 debug（不恢复 target 缓存）：clippy/build/test 覆盖 target/debug 全部工件。
       - name: Warm debug (clippy + build + test)
+        shell: bash
         run: |
           python tools/automation/check.py -Gate clippy
           python tools/automation/check.py -Gate build
@@ -90,16 +98,16 @@ jobs:
       # 只预热 debug 目标（+ registry + tauri-cli）：release 目标不预热（release.yml 需要时自己冷编）。
       - name: Drop stale caches（同键先删，保证新缓存覆盖旧的）
         continue-on-error: true
-        shell: pwsh
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           # GitHub 缓存 key 不可变：同键已存在时 save 会被拒（旧的永远留着）。先按 key 删掉旧的。
-          foreach ($k in @($env:CARGO_CACHE_KEY, $env:TARGET_DEBUG_KEY, $env:TAURI_CLI_KEY)) {
-            if (-not $k) { continue }
-            $n = gh api --method DELETE "repos/${{ github.repository }}/actions/caches?key=$k" 2>$null
-            Write-Host "drop $k -> $n"
-          }
+          for k in "$CARGO_CACHE_KEY" "$TARGET_DEBUG_KEY" "$TAURI_CLI_KEY"; do
+            [ -n "$k" ] || continue
+            gh api --method DELETE "repos/${{ github.repository }}/actions/caches?key=$k" >/dev/null 2>&1 || true
+            echo "drop $k"
+          done
 
       - name: Save cargo registry
         continue-on-error: true
