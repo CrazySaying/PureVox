@@ -23,3 +23,6 @@
 # opencode 本地配置不入库；项目 skills 随仓库同步
 .opencode/*
 !.opencode/skills/
+
+# run_release_stage.py 的临时产物树（台子自己会删，这里兜底）
+.relstage_test/

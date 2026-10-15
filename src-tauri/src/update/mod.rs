@@ -190,7 +190,7 @@ fn tag_to_stamp(tag: &str) -> Option<String> {
   version::parse_stamp(t).map(|_| t.to_string())
 }
 
-/// `2026.10.08.1430` → `26.10.8`（界面显示版本，与 `version.sh` 的映射同款）。
+/// `2026.10.08.1430` → `26.10.8`（界面显示版本，与 `version.py` 的映射同款）。
 /// 段按整数取值再拼，故 `08` 打成 `8`——必须与 CI 产出的包版本逐字相同。
 fn stamp_to_version(stamp: &str) -> String {
   let p: Vec<&str> = stamp.split('.').collect();
@@ -448,6 +448,20 @@ pub fn install() -> Result<String, String> {
 mod tests {
   use super::*;
 
+  /// release.yml 的原文 —— 编译期嵌进来，所以 CI 改了产物命名、本仓库的测试立刻红，
+  /// 不存在「忘了同步」。
+  /// 产物命名规则的**唯一来源**：`tools/automation/release_stage.sh` 里的 `stage` 行。
+  ///
+  /// 曾经指向 release.yml —— 那段 `stage` 逻辑内联在 workflow 里，所以是 workflow
+  /// 的事实来源。但**内联的脚本等于没被测过的脚本**：打第一次真 tag 才发现
+  /// 「收集完文件名后 `cd ..` 回上一层 → 相对路径全失效」。搬到 .sh 之后，
+  /// `run_release_stage.py` 能在本地用假产物树 + 假 gh 把它跑通。
+  ///
+  /// 注意 `.count()` 的断言不能省：源文件换了地方而这里忘了改的话，
+  /// `lines().filter(...)` 会**一条都匹配不到**，`tpls.len() >= 6` 就是唯一
+  /// 把它拦下来的东西。
+  const RELEASE_STAGE_SH: &str = include_str!("../../../tools/automation/release_stage.sh");
+
   fn asset(name: &str) -> Asset {
     Asset {
       name: name.into(),
@@ -474,8 +488,8 @@ mod tests {
 
   #[test]
   fn stamp_to_version_matches_version_script_mapping() {
-    // 与 tools/automation/version.sh 的 major=年-2000 / minor=月 / build=日 一致。
-    // 月/日都按整数取值再拼，故 09 月打成 9；版本脚本那边用 10# 去前导零
+    // 与 tools/automation/version.py 的 major=年-2000 / minor=月 / build=日 一致。
+    // 月/日都按整数取值再拼，故 09 月打成 9；version.py 那边用 int() 去前导零
     // （bash 会把 09 当八进制），两边必须逐字相同 —— 版本检测的门禁就在这儿。
     assert_eq!(stamp_to_version("2026.10.08.1430"), "26.10.8");
     assert_eq!(stamp_to_version("2026.09.30.1944"), "26.9.30");
@@ -600,50 +614,158 @@ mod tests {
   }
 
   #[test]
-  fn artifact_names_published_by_ci_carry_the_tag_version() {
-    // release.yml 统一重命名成 `PureVox-<版本>-<平台>.<ext>`。这里对**全部五个平台**断言：
-    // 名字里的版本段必须等于「本次发布 tag 的戳还原出的显示版本」，否则界面上写 26.10.14、
-    // 包名里却是别的版本号，用户升级时才看得见。
+  fn ci_asset_names_match_the_tag_version() {
+    // **直接读 release_stage.sh**，不把产物名硬编码在测试里 —— 之前这里写死一份名字列表，
+    // 名字全是自己跟自己比，所以 CI 实际产出 `-linux-x64.deb` 而测试里写
+    // `-linux-x86_64.deb` 也照样绿。改了命名规则没人会发现，用户照着 release notes
+    // 去找文件才扑空。
+    //
+    // 断言两件最容易错的事：
+    // ① 版本段来自 `${VERSION}` 而不是空串 —— release job 曾经从没跑过 version.py，
+    //    产物名全叫 `PureVox--windows-x64-setup.exe`（双连字符）；
+    // ② 每个平台段的**后缀**正好是本平台认领的后缀，且六个平台互不重叠。
+    let tpls: Vec<&str> = RELEASE_STAGE_SH
+      .lines()
+      .filter(|l| l.contains("stage \"out/PureVox-"))
+      .map(|l| {
+        l.split("stage \"out/")
+          .nth(1)
+          .expect("含 stage 的行必有 out/ 前缀")
+          .split('"')
+          .next()
+          .expect("引号必闭合")
+      })
+      .collect();
+    assert!(
+      tpls.len() >= 6,
+      "release_stage.sh 里的产物模板只剩 {} 个，命名规则变了要重新审这一段",
+      tpls.len()
+    );
+
     let tag = "v2026.10.14.1530";
     let want = stamp_to_version(&tag_to_stamp(tag).expect("合法 tag"));
-    assert_eq!(want, "26.10.14");
-    for platform in [
-      "-windows-x64.msi",
-      "-windows-x64-setup.exe",
-      "-linux-x86_64.AppImage",
-      "-linux-x86_64.deb",
-      "-linux-x86_64.rpm",
-      "-android-arm64.apk",
-    ] {
-      let name = format!("PureVox-{want}{platform}");
-      let stamped = name
-        .trim_end_matches(platform)
-        .strip_prefix("PureVox-")
-        .expect("产物名以 PureVox- 开头");
-      assert_eq!(stamped, want, "{platform} 的产物名版本段");
-      // 显示版本再过一次 stamp 还原不能变形（update 面板用它显示 latest_version）
-      assert_eq!(stamp_to_version("2026.10.14.1530"), stamped);
+    let mut suffixes: Vec<String> = Vec::new();
+    for tpl in &tpls {
+      assert!(
+        tpl.contains("${VERSION}"),
+        "产物模板 {tpl} 没插版本号 → 名字里会缺一段，pick_asset 仍能按后缀认出来但用户看不懂"
+      );
+      let name = tpl.replace("${VERSION}", &want);
+      assert!(
+        !name.contains("--"),
+        "产物名 {name} 有空版本段（双连字符）：多半是 env.VERSION 在该 job 里从没被赋值"
+      );
+      let suffix = name
+        .strip_prefix(&format!("PureVox-{want}-"))
+        .unwrap_or_else(|| panic!("产物名 {name} 的版本段与 tag 不一致"));
+      assert!(
+        !suffixes.iter().any(|s| s == suffix),
+        "平台段 {suffix} 重复出现，pick_asset 会挑到别人的产物"
+      );
+      suffixes.push(suffix.to_string());
     }
-  }
 
-  #[test]
-  fn every_platform_artifact_suffix_is_distinct() {
-    // 产物后缀是 pick_asset 的唯一依据（不看版本号），后缀重复/互为后缀会让
-    // 「挑到本平台产物」在某个平台上悄悄挑错——例：`.AppImage` 与 `Image`。
-    let all = [
-      "-windows-x64.msi",
-      "-windows-x64-setup.exe",
-      "-linux-x86_64.AppImage",
-      "-linux-x86_64.deb",
-      "-linux-x86_64.rpm",
-      "-android-arm64.apk",
-    ];
-    for a in all {
-      for b in all {
+    // 六个平台段的后缀互不为彼此的后缀（`pick_asset` 只认后缀，重叠就会挑错）
+    for a in &suffixes {
+      for b in &suffixes {
         if a != b {
           assert!(!a.ends_with(b), "后缀 {a} 会被 {b} 抢先命中");
         }
       }
     }
+  }
+
+  /// **CI 产出的产物名必须落在运行期 `ASSET_SUFFIXES` 认的后缀里** —— 这条才是真正会伤到
+  /// 用户的那一种漂移，而上面那个测试**抓不到**。
+  ///
+  /// `pick_asset` 拿产物名去比对 `install_{linux,windows}.rs` 里那三个字面量（"`.deb`"）。
+  /// 两边各写各的，于是「把 release 里的 `-linux-x64.deb` 改名成 `-linux-x86_64.deb`」
+  /// 这种改动会让上面所有断言照样全绿（它们只查内部一致性），但**从此再也匹配不到任何
+  /// 产物 —— 自动更新彻底静默失效，用户不会看到任何报错，只会发现「永远有新版本」**。
+  ///
+  /// 所以这里把三份东西交叉比对：`release_stage.sh` 里 `stage` 出的名字、
+  /// `install_*.rs` 里 `ASSET_SUFFIXES` 的字面量、以及本模块的 `pick_asset` 本身
+  /// （构造一遍假资产列表走一遍真实函数，不只是比对字符串）。
+  #[test]
+  fn staged_names_are_claimable_by_pick_asset() {
+    let linux_rs = include_str!("install_linux.rs");
+    let windows_rs = include_str!("install_windows.rs");
+
+    fn suffixes_of(src: &str, platform: &str) -> Vec<String> {
+      let line = src
+        .lines()
+        .find(|l| l.contains("ASSET_SUFFIXES: &[&str] = &["))
+        .unwrap_or_else(|| panic!("{platform} 里找不到 ASSET_SUFFIXES 定义"));
+      line
+        // `&[` 在 `&[&str] = &[...]` 里出现**两次**（类型与数组各一），所以要 rsplit 取
+        // 最后一段；用 split().nth(1) 会取到中间的 `&str] = `，凭空只认出 1 个后缀。
+        .rsplit("&[")
+        .next()
+        .and_then(|s| s.split(']').next())
+        .expect("数组字面量必闭合")
+        .split(',')
+        .map(|s| s.trim().trim_matches('"'))
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_ascii_lowercase())
+        .collect()
+    }
+
+    let known: Vec<String> = suffixes_of(linux_rs, "linux")
+      .into_iter()
+      .chain(suffixes_of(windows_rs, "windows"))
+      .collect();
+    assert!(
+      known.len() >= 5,
+      "只认出 {} 个后缀，两个平台的定义都被改了？",
+      known.len()
+    );
+
+    // 走一遍真实的 stage 模板：把 ${VERSION} 换成假版本，取出后缀
+    let want = stamp_to_version(&tag_to_stamp("v2026.10.14.1530").expect("合法 tag"));
+    let staged: Vec<String> = RELEASE_STAGE_SH
+      .lines()
+      .filter(|l| l.contains("stage \"out/PureVox-"))
+      .map(|l| {
+        l.split("stage \"out/")
+          .nth(1)
+          .expect("含 stage 的行必有 out/ 前缀")
+          .split('"')
+          .next()
+          .expect("引号必闭合")
+          .replace("${VERSION}", &want)
+      })
+      .map(|n| n.to_ascii_lowercase())
+      .collect();
+    assert!(staged.len() >= 6, "只抠出 {} 个 stage 模板", staged.len());
+
+    for name in &staged {
+      // **Android 的 apk 是例外**：它由安卓客户端自己认领（本模块是桌面端更新逻辑，
+      // 用户手机上装的 apk 永远不会出现在这里查的 latest release 资产列表给桌面的语境里
+      // —— 真出现也认领不到，`.apk` 本来就不在 ASSET_SUFFIXES 里）。所以它必须显式跳过，
+      // 否则这条断言会把「桌面端不该管安卓」当成缺陷报出来。
+      if name.contains("-android-") {
+        continue;
+      }
+      let claimed = known.iter().any(|s| name.ends_with(s.as_str()));
+      assert!(
+        claimed,
+        "产物名 {name} 的后缀不在任何平台的 ASSET_SUFFIXES 里（{known:?}）—— \
+         自动更新会静默失效：pick_asset 一个都匹配不上，用户只会看到「永远有新版本」"
+      );
+    }
+
+    // 不止比字符串：用真实 pick_asset 走一遍，确认它真能从这批产物里挑出东西
+    let assets: Vec<Asset> = staged
+      .iter()
+      .map(|n| Asset {
+        name: n.clone(),
+        browser_download_url: format!("https://example.invalid/{n}"),
+        size: 1,
+      })
+      .collect();
+    assert!(
+      pick_asset(&assets).is_some(),
+      "pick_asset 对这批真实产物名一个都挑不出来"
+    );
   }
 }

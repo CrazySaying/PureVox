@@ -44,14 +44,15 @@
     节拍诊断 `net/diag.rs`。Android 客户端用系统自带 `MediaCodec`（`audio/opus`），
     **无 JNI / 无 NDK**；明文 `ws://` + `usesCleartextTraffic`。
 - Android 客户端已能构建并运行（2026-10-08）：`./gradlew assembleDebug`（JDK17 + SDK 34）出
-  `app-debug.apk`，`adb install` + 启动成功。修掉了一批从未编译过的 Kotlin 错误：
+  `app-debug.apk`，`adb install` + 启动成功。**发版走 `assembleRelease` + 签名**（凭据走环境变量、
+  keystore 在仓库外，见 `android/README.md`；CI 缺 secret 直接失败，不发未签名包）。修掉了一批从未编译过的 Kotlin 错误：
   `MediaCodec.queueInputBuffer` 少传 `flags`、`AudioRecord.read(float[])` 少传 `readMode`、
   `MediaCodecInfo` 上不存在的 `isFormatSupported`（应取 `getCapabilitiesForType(MIME)`）、
   `View.layoutHeight`（应为 `height`）、okio `ByteString.of(ByteArray)` 已废弃（改用 `toByteString()`）、
   以及非公开 API `AudioRecord.Builder.setPerformanceMode`（SDK 里根本没有，删除）。
 - UI 字符串统一管理已落地（2026-10-07）：`i18n.js` 单字典 + `T()` 占位符 + `__pvTpl()` Rust 模板表
   + `i18n_lint` 门禁（规则见 AGENTS.md §4）。
-- **Linux 已跑通并出包**（2026-10-08）：本机 Ubuntu 24.04（CI 用 `ubuntu-latest`）`cargo build` /
+- **Linux 已跑通并出包**（2026-10-08）：本机 Ubuntu 24.04（CI 用 `ubuntu-24.04`）`cargo build` /
   `clippy -D warnings` / `test`（40 项全过）/ `cargo tauri build` 均通过，出 deb / rpm / AppImage；
   `tools/automation/check.py` 跨平台（Windows / Linux / macOS 同一份）。Windows 专有功能在其它平台给
   **明确「不可用」**而不静默：全局热键（`RegisterHotKey`）、AEC 远端 WASAPI 回环（改填输入设备作参考）。
@@ -239,7 +240,7 @@ sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file \
   libxdo-dev libssl-dev librsvg2-dev libgtk-3-dev libasound2-dev pkg-config rpm
 ```
 
-CI 用 `ubuntu-latest`（Ubuntu 24.04，glibc 2.39）——`onnxruntime` 预编译包依赖较新的 glibc
+CI 用 `ubuntu-24.04`（Ubuntu 24.04，glibc 2.39）——`onnxruntime` 预编译包依赖较新的 glibc
 （22.04 链接会报 `__isoc23_strtol` 未定义），因此 Linux 安装包要求 **glibc ≥ 2.39**（Ubuntu 24.04+ / 较新发行版）。
 Fedora / Arch / openSUSE 等发行版的包名见 prerequisites 页对应标签。
 
@@ -410,15 +411,16 @@ Android 那段写死了仓库路径，于是「试跑到临时目录」反而把
   `pip install`。两个 workflow 里的 `shell: pwsh` 也随之取消。同理 `version.py` /
   `gen_icons.py` 也都是**单份 Python**，取代原先的 `.ps1` + `.sh` 双份。
 - **工作流** `.github/workflows/`：
-  - `tests.yml`：手动 → Rust 门禁矩阵 `windows-latest` + `ubuntu-latest`；`ui` 门禁在 `ubuntu-latest`。
+  - `tests.yml`：手动 → Rust 门禁矩阵 `windows-latest` + `ubuntu-24.04`；`ui` 门禁在 `ubuntu-24.04`。
   - `warm-cache.yml`：**全仓库唯一缓存写入者**，手动；矩阵 Windows+Linux **冷构建**（不恢复 target 缓存）
     debug 三门禁 + `cargo tauri build`，再 save 四个桶（`continue-on-error`，同键已存在即视为成功）。
   - `release.yml`：tag `v*` 或手动 → 三平台并行：
     - **Windows**：门禁 → `cargo tauri build` → `assert_bundle.py --smoke` → MSI/NSIS。
-    - **Linux**（`ubuntu-latest`）：装 WebKitGTK/ALSA/rpm 依赖 → 门禁 → `cargo tauri build` →
+    - **Linux**（`ubuntu-24.04`）：装 WebKitGTK/ALSA/rpm 依赖 → 门禁 → `cargo tauri build` →
       `assert_bundle.py --smoke` → `test_packages.py`（deb→ubuntu / rpm→fedora 容器安装验证）→
       deb/rpm/AppImage。
-    - **Android**：JDK17 + `install_android_sdk.py` + `./gradlew assembleDebug` → debug APK。
+    - **Android**：JDK17 + `install_android_sdk.py` + 从 `gh secret` 还原签名 keystore →
+      `./gradlew assembleRelease` → **签名 release APK**（`PV_REQUIRE_SIGNING=1`，缺 secret 当场失败）。
     - tag 时 `release_notes.py`（上一 tag 区间）+ `gh release create` 附带全部产物；手动只打包、不建 release。
   - **没有 Lite 变体**（Lite 已取消；遗留资产已收进只读快照 `legacy-v2026.09.30.1944/`）。
 - **缓存纪律**：`tests.yml` / `release.yml` 全部 `actions/cache/restore`（无 save）；键与版本唯一来源 =
@@ -461,7 +463,7 @@ Android 那段写死了仓库路径，于是「试跑到临时目录」反而把
 - 用 **Tauri 3 alpha**（`3.0.0-alpha.4`）+ **wry**（系统 WebView2，包小）。
 - 音频引擎**用 Rust 原生重写**（设备 I/O + onnxruntime Rust 绑定），不挂 Python sidecar。
 - **Linux 打包依赖**：wry 需 WebKitGTK 4.1、cpal 需 ALSA、rpm 需 rpmbuild，托盘不再需 appindicator
-  （见 §3.2）；Linux 出包用 `ubuntu-latest`（24.04），**要求 glibc ≥ 2.39**（onnxruntime 预编译包所致）。
+  （见 §3.2）；Linux 出包用 `ubuntu-24.04`（24.04），**要求 glibc ≥ 2.39**（onnxruntime 预编译包所致）。
 - **多平台 CI + 无自动触发**：测试手动、打包 tag 触发，三平台（Windows / Linux / Android），
   无 Lite 变体（见 §3.7）。
 

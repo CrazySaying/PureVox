@@ -27,7 +27,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        os: [windows-latest, ubuntu-24.04]
     defaults:
       run:
         shell: bash
@@ -38,16 +38,35 @@ jobs:
       - name: Load versions + cache keys (versions.env 是唯一来源)
         shell: bash
         run: |
+          # **必须 source，不能只写 GITHUB_ENV**：写进 $GITHUB_ENV 的变量要到**后续 step**
+          # 才注入进程环境，而缓存键就在这一步里拼 —— 只写不 source 的话 $CACHE_GEN /
+          # $LINUX_CACHE_TAG / $TCLI_VER 全是空串，拼出来的键是残的（实测出现过
+          # `purevox-Linux--cargo--<hash>`：恢复必然不命中，随后 cargo install 撞上
+          # runner 镜像自带的 cargo-tauri 直接 exit 101）。
+          set -a
+          . tools/automation/versions.env
+          set +a
+          # 再写进 GITHUB_ENV，供后续 step 使用
           while IFS= read -r line || [ -n "$line" ]; do
             case "$line" in
               ''|'#'*) continue ;;
               *=*) printf '%s\n' "$line" >> "$GITHUB_ENV" ;;
             esac
           done < tools/automation/versions.env
+          # 缓存键 = 发行版 + 缓存代数 + Cargo.lock 哈希。唯一写入者是 warm-cache.yml。
+          # **发行版段不能省**：target/ 里是各发行版自己编出来的 C 依赖产物
+          # （ort-sys / aws-lc-sys / ring），跨发行版回读就是用错中间产物；
+          # `ubuntu-24.04` 还在无人察觉地从 24.04 迁到 26.04。取值来自 versions.env 的
+          # LINUX_CACHE_TAG，不在 runner 上探测 —— 探测不到会静默退化成同一个键，
+          # 不同版本又混回一起，等于白加这一段（见 AGENTS §2.7 缓存纪律）。
           lock="${{ hashFiles('src-tauri/Cargo.lock') }}"
+          case "$RUNNER_OS" in
+            Windows) os_tag="windows" ;;
+            *)       os_tag="$LINUX_CACHE_TAG" ;;
+          esac
           {
-            printf 'CARGO_CACHE_KEY=purevox-%s-cargo-%s-%s\n' "$RUNNER_OS" "$CACHE_GEN" "$lock"
-            printf 'TARGET_DEBUG_KEY=purevox-%s-target-dbg-%s-%s\n' "$RUNNER_OS" "$CACHE_GEN" "$lock"
+            printf 'CARGO_CACHE_KEY=purevox-%s-%s-cargo-%s-%s\n' "$RUNNER_OS" "$os_tag" "$CACHE_GEN" "$lock"
+            printf 'TARGET_DEBUG_KEY=purevox-%s-%s-target-dbg-%s-%s\n' "$RUNNER_OS" "$os_tag" "$CACHE_GEN" "$lock"
             printf 'TAURI_CLI_KEY=purevox-%s-tauri-cli-%s\n' "$RUNNER_OS" "$TCLI_VER"
           } >> "$GITHUB_ENV"
 
@@ -74,20 +93,24 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
           key: ${{ env.CARGO_CACHE_KEY }}
-          restore-keys: |
-            purevox-${{ runner.os }}-cargo-${{ env.CACHE_GEN }}-
 
       - name: Restore cargo-tauri binary (restore-only)
-        id: tcli
         uses: actions/cache/restore@v6
         with:
           path: ~/.cargo/bin/cargo-tauri*
           key: ${{ env.TAURI_CLI_KEY }}
 
-      - name: Install tauri-cli (仅缓存未命中时编译，版本钉死)
-        if: steps.tcli.outputs.cache-hit != 'true'
+      - name: Install tauri-cli（仅在缺失时编译，版本钉死）
         shell: bash
-        run: cargo install tauri-cli --version "$TCLI_VER" --locked
+        run: |
+          # 判据是「盘上有没有」，不是 cache-hit 输出 —— runner 镜像可能已预装 cargo-tauri，
+          # 那时 cache-hit 是 false 但二进制已在，`cargo install` 会撞
+          # "binary already exists in destination"。command -v 判断天然幂等。
+          if command -v cargo-tauri >/dev/null 2>&1; then
+            echo "cargo-tauri 已存在（缓存或镜像预装），跳过安装"
+          else
+            cargo install tauri-cli --version "$TCLI_VER" --locked
+          fi
 
       # 冷构建 debug（不恢复 target 缓存）：clippy/build/test 覆盖 target/debug 全部工件。
       - name: Warm debug (clippy + build + test)

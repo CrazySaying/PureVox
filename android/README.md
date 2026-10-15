@@ -64,11 +64,51 @@ app/src/main/java/com/purevox/mic/
 ```bash
 cd android
 ./gradlew :app:assembleDebug      # 产物 app/build/outputs/apk/debug/app-debug.apk
-./gradlew :app:assembleRelease
+./gradlew :app:assembleRelease    # 产物 app/build/outputs/apk/release/app-release.apk
 ```
 
 需要 JDK 17 与 Android SDK（`compileSdk 34`）。`gradle/wrapper/gradle-wrapper.jar` 已入库，
 不要替换；`gradle-wrapper.properties` 钉的是 Gradle 8.9（AGP 8.7.3 的最低要求）。
+
+### release 签名
+
+**凭据一律走环境变量、keystore 放在仓库外面**，仓库里没有 `keystore.properties` 也没有
+`*.jks` —— 于是不存在「忘了写 .gitignore 把私钥提交上去」这种坑。
+
+| 变量 | 内容 |
+| --- | --- |
+| `PV_KEYSTORE` | keystore 文件的**绝对路径**（PKCS12） |
+| `PV_KEY_ALIAS` | 密钥别名 |
+| `PV_KEY_PASS` | keystore 口令与私钥口令（同一个） |
+| `PV_REQUIRE_SIGNING` | `1` = 缺凭据**直接失败**；不设 = 产出未签名的包 |
+
+```bash
+export PV_KEYSTORE="$HOME/.purevox/signing/purevox-release.p12"
+export PV_KEY_ALIAS=purevox
+export PV_KEY_PASS='…'
+./gradlew :app:assembleRelease
+```
+
+### 签名方案（逐条写死，不靠 AGP 默认值）
+
+| 方案 | 取值 | 依据 |
+| --- | --- | --- |
+| v1（JAR） | **关** | 只对 `minSdk < 24` 有意义；本项目 minSdk=24，开着只是白搭一份 `META-INF` |
+| v2 | **开** | 必需项。整包哈希，比 v1 的逐条目哈希更难伪造 |
+| v3 | **开** | 目前唯一带密钥轮换能力的方案（OWASP：「至少 v2 或 v3，想要轮换就用 v3」） |
+| v4 | 不做 | 只产出独立的 `.idsig`（供 adb 增量安装），自身零安全收益，还多一个附件 |
+
+密钥本身：PKCS12（JKS 已过时）、RSA-4096（≥ 官方要求的 2048）、有效期 30 年
+（官方建议 ≥ 25 年，Play 额外要求有效期晚于 2033-10-22）。
+
+**开了 v3 ≠ 应该去轮换密钥。** proof-of-rotation 只有 **Android 13+（API 33）**认，
+Android 12 及更早会忽略它继续用原密钥 —— 本项目 `minSdk = 24`，一旦轮换，
+那一大片用户会因为新密钥不被认识而**装不上**。所以正确做法是：开 v3 当保险，**把密钥守住**。
+
+**没设凭据时 `assembleRelease` 仍能出包，但那是未签名的 —— Android 不允许安装未签名包。**
+本机调试无所谓，CI 一律设 `PV_REQUIRE_SIGNING=1`，缺 secret 就当场红，不产出装不上的版本
+（发出去无法补救，重打要重发一版）。CI 的三个 secret 与生成方式见
+`~/.purevox/signing/keystore-info.txt`。
 
 ## 依赖 Android 版本的行为
 

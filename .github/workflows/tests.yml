@@ -24,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        os: [windows-latest, ubuntu-24.04]
     defaults:
       run:
         shell: bash
@@ -36,20 +36,37 @@ jobs:
       - name: Load versions + cache keys (versions.env 是唯一来源)
         shell: bash
         run: |
-          # versions.env 是 KEY=VALUE，一行行喂给 GITHUB_ENV
-          # （原来这段是 PowerShell 的 Get-Content | Where-Object | ForEach-Object）。
+          # **必须 source，不能只写 GITHUB_ENV**：写进 GITHUB_ENV 的变量要到**后续 step**
+          # 才注入进程环境，而缓存键就在这一步里拼 —— 只写不 source 的话 $CACHE_GEN / $TCLI_VER
+          # 全是空串，拼出来的键是残的（踩过：键里少了 cache_gen。当时靠 restore-keys 兜底
+          # 才没炸，没有 restore-keys 的那一步直接失败）。
+          set -a
+          . tools/automation/versions.env
+          set +a
+          # 再写进 GITHUB_ENV，供后续 step 使用
           while IFS= read -r line || [ -n "$line" ]; do
             case "$line" in
               ''|'#'*) continue ;;
               *=*) printf '%s\n' "$line" >> "$GITHUB_ENV" ;;
             esac
           done < tools/automation/versions.env
-          # 缓存键 = 缓存代数 + Cargo.lock 哈希。唯一写入者是 warm-cache.yml。
+          # 缓存键 = 发行版 + 缓存代数 + Cargo.lock 哈希。唯一写入者是 warm-cache.yml。
           lock="${{ hashFiles('src-tauri/Cargo.lock') }}"
+          # 发行版标记：target/ 里是各发行版自己编出来的 C 依赖产物
+          # （ort-sys / aws-lc-sys / ring），跨发行版回读就是用错中间产物。
+          # 取值来自 versions.env 的 LINUX_CACHE_TAG —— `runs-on:` 是写死的（拿不到 env 上下文），
+          # 发行版本来就静态已知，没必要在 runner 上探测：探测不到就静默退化成同一个键，
+          # 不同版本又混回一起，等于白加这一段。
+          case "$RUNNER_OS" in
+            Windows) os_tag="windows" ;;
+            *)       os_tag="$LINUX_CACHE_TAG" ;;
+          esac
           {
-            printf 'CARGO_CACHE_KEY=purevox-%s-cargo-%s-%s\n' "$RUNNER_OS" "$CACHE_GEN" "$lock"
-            printf 'TARGET_DEBUG_KEY=purevox-%s-target-dbg-%s-%s\n' "$RUNNER_OS" "$CACHE_GEN" "$lock"
+            printf 'CARGO_CACHE_KEY=purevox-%s-%s-cargo-%s-%s\n' "$RUNNER_OS" "$os_tag" "$CACHE_GEN" "$lock"
+            printf 'TARGET_DEBUG_KEY=purevox-%s-%s-target-dbg-%s-%s\n' "$RUNNER_OS" "$os_tag" "$CACHE_GEN" "$lock"
           } >> "$GITHUB_ENV"
+          # 把算出来的键打进日志：键拼错时不必再猜，扫一眼日志就知道
+          echo "CARGO_CACHE_KEY=$CARGO_CACHE_KEY"
 
       # cpal 在 Linux 上要 ALSA 开发头（pkg-config 名字 `alsa`）；WebKitGTK 4.1 是 Tauri wry 运行时必需。
       - name: Install Linux system deps
@@ -68,6 +85,14 @@ jobs:
           rustup default "$RUST_TOOLCHAIN"
           rustc --version
 
+      # 下面两个 restore **一律不写 restore-keys**：精确命中就是唯一路径（AGENTS §2.1）。
+      # 兜底键看着像优化，实际是自伤：
+      #   ① 键格式改版（加发行版段）时，旧格式的兜底键会跨发行版把旧 target/ 回读进来，
+      #      LINUX_CACHE_TAG 防的就是这个，被兜底键一绕就等于没加；
+      #   ② Cargo.lock 一变就静默回退到某个旧桶，此时「命中了缓存」这件事不再等于
+      #      「缓存内容对得上当前依赖」，排查时极具误导性。
+      # 想要某次依赖变更后重新暖桶：手跑一次 warm-cache.yml（或按需 bump CACHE_GEN），
+      # 这本来就是手动流程，不值得用兜底键去换。
       - name: Restore cargo registry (restore-only)
         uses: actions/cache/restore@v6
         with:
@@ -75,16 +100,12 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
           key: ${{ env.CARGO_CACHE_KEY }}
-          restore-keys: |
-            purevox-${{ runner.os }}-cargo-${{ env.CACHE_GEN }}-
 
       - name: Restore target/debug (restore-only)
         uses: actions/cache/restore@v6
         with:
           path: src-tauri/target/debug
           key: ${{ env.TARGET_DEBUG_KEY }}
-          restore-keys: |
-            purevox-${{ runner.os }}-target-dbg-${{ env.CACHE_GEN }}-
 
       - name: "Gate · fmt"
         shell: bash
@@ -109,9 +130,14 @@ jobs:
         shell: bash
         run: python tools/automation/check.py -Gate version
 
+      # 打包配置自检（纯读 tauri.conf.json，不编译，两个平台都跑没意义 —— 放 ui job 旁边）
+      - name: "Gate · bundle"
+        shell: bash
+        run: python tools/automation/check.py -Gate bundle
+
   ui:
     name: 界面检查（tsc + i18n）
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         shell: bash

@@ -17,7 +17,7 @@
 
 //! 构建版本号（**版本号 = 年.月.日**）。
 //!
-//! 打包/发版时由 `tools/automation/version.{sh,ps1}`（唯一实现）从 tag
+//! 打包/发版时由 `tools/automation/version.py`（跨平台唯一实现）从 tag
 //! （`v<yyyy.MM.dd.HHmm>`）或当前 UTC 时间推导，产出两个编译期常量：
 //! - [`VERSION`] = `yy.M.d`（如 `26.10.8`）：**显示用**，也是 Tauri/MSI 的包版本。
 //!   必须三段：Tauri 要 semver，MSI ProductVersion 限 major≤255 / minor≤255 /

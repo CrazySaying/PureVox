@@ -345,28 +345,164 @@ release 构建同样保留（不允许用编译开关剔除）。
      （CI runner 自带、本机还得自己搞），Python 三边都自带，冷启动 ~20 ms vs pwsh ~330 ms，
      且只用标准库、不用 `pip install`。**CI 与本机跑同一份**（`-Gate` 拆 step 便于定位日志）。
    - 工作流（`.github/workflows/`）：
-     - `tests.yml`：手动 → Rust 门禁矩阵 `windows-latest` + `ubuntu-latest`
-       （fmt/clippy/build/test）、`ui` 门禁（`ubuntu-latest`：setup-node → `-Gate ui`）。**不打包**。
+     - `tests.yml`：手动 → Rust 门禁矩阵 `windows-latest` + `ubuntu-24.04`
+       （fmt/clippy/build/test）、`ui` 门禁（`ubuntu-24.04`：setup-node → `-Gate ui`）。**不打包**。
      - `warm-cache.yml`：**全仓库唯一缓存写入者**，手动；矩阵 Windows+Linux 冷构建
        target，预热 debug 三门禁 + `cargo tauri build`，再 save 四个桶（cargo registry /
        target-debug / target-release / cargo-tauri binary；`continue-on-error`，同键已存在即成功）。
      - `release.yml`：tag `v*` 或手动 → 三平台并行：
        **Windows**（门禁 + `cargo tauri build` + `assert_bundle.py --smoke` → MSI/NSIS）；
-       **Linux**（`ubuntu-latest`：装 WebKitGTK/ALSA/rpm 依赖 + 门禁 + `cargo tauri build` +
+       **Linux**（`ubuntu-24.04`：装 WebKitGTK/ALSA/rpm 依赖 + 门禁 + `cargo tauri build` +
        `assert_bundle.py --smoke` + `test_packages.py`（deb→ubuntu / rpm→fedora 容器安装验证）→
        deb/rpm/AppImage）；
-       **Android**（JDK17 + `install_android_sdk.py` + `./gradlew assembleDebug` → debug APK）。
+       **Android**（JDK17 + `install_android_sdk.py` + 从 `gh secret` 还原 keystore →
+       `./gradlew assembleRelease` → **已签名的 release APK**）。**凭据一律走环境变量、keystore 一律放
+       仓库外面**（`PV_KEYSTORE` / `PV_KEY_ALIAS` / `PV_KEY_PASS`，见 `android/README.md`）——
+       仓库里一个凭据文件都没有，所以不存在「忘了 gitignore 把私钥提交上去」。CI 另设
+       `PV_REQUIRE_SIGNING=1`：缺 secret **当场失败**，绝不产出未签名的包（Android 不允许安装未签名
+       包，发出去无法补救，重打要重发一版）。
+       **为什么必须固定密钥**：Android 只允许同一把密钥的包互相覆盖升级。而在此之前
+       `assembleDebug` 用的是 debug keystore，CI runner 上根本不存在 `~/.android/debug.keystore`
+       —— AGP 每次都**当场生成一个一次性的**。实测：2026-09-30 的 release APK 与 2026-10-15 的
+       CI APK **签名者公钥不同**（264 B，同为 RSA-2048，内容却不一样），即**以前每一版都得先卸载
+       才能装**。换成固定的 release keystore 之后才第一次有稳定身份。不要退回 `assembleDebug`：
+       那等于每次发版都换一次密钥，用户永远只能重装。
+       **签名方案逐条写死在 `build.gradle.kts`（不靠 AGP 默认值，默认值会随版本变）**：
+       v1 关（minSdk=24 用不上）、v2 开（必需）、v3 开（唯一支持密钥轮换的方案）、
+       v4 不做（只多产一个 `.idsig`，零安全收益）。**开了 v3 也不要去轮换密钥** ——
+       proof-of-rotation 只有 Android 13+ 认，Android 12 及更早仍用原密钥，而 minSdk=24，
+       轮换会把那一大片用户挡在门外。CI 用 `apksigner verify` 断言 v3 真的在 +
+       `zipalign -c` 断言已对齐（官方定义的「release-ready APK」是签过名**且**对齐过的）。
        tag 时再 `release_notes.py` 生成说明并 `gh release create` 附带全部产物；手动触发只打包、不建 release。
+      **发版那一步的实现是 `tools/automation/release_stage.sh`（不内联在 workflow 的 `run:` 里）**：
+      那段逻辑（按扩展名 stage → 统一改名 → 交给 gh）**从未成功执行过**，第一次真打 tag
+      就暴露出「收集完文件名后 `cd ..` 回上一层 → 相对路径全部失效 → gh 报
+      `no matches found for './PureVox-…apk'`」。**内联的脚本等于没被测过的脚本**。
+      落到文件后，`tools/automation/run_release_stage.py` 用假产物树 + 假 `gh` 在本地跑通
+      三个场景（齐全 / 缺产物 / 缺 notes），并挂在 `bundle` 门禁里 —— 测的就是发布的同一份文件。
+      `update/mod.rs` 的两个单测也从 `release_stage.sh` 读产物名：一个查命名互不重叠，
+      另一个查**每个产物名都落在运行期 `ASSET_SUFFIXES` 认的后缀里** —— 后缀对不上不会
+      报任何错，只是自动更新静默失效，用户只看到「永远有新版本」。
        **没有 Lite 变体**（其遗留资产已收进只读快照 `legacy-v2026.09.30.1944/`，见 §2.5）。
    - **缓存纪律**：`tests.yml` / `release.yml` 只 restore、不写缓存；键为
-     `purevox-<RUNNER_OS>-<桶>-<CACHE_GEN>-…`。缓存桶与全部版本（含 `JDK_VER` /
-     `ANDROID_PLATFORM` / `ANDROID_BUILD_TOOLS`）的唯一来源 = `tools/automation/versions.env`
+     `purevox-<RUNNER_OS>-<发行版>-<桶>-<CACHE_GEN>-<Cargo.lock 哈希>`，**发行版段来自
+     `versions.env` 的 `LINUX_CACHE_TAG`**（`runs-on:` 写死，发行版静态已知，不在 runner 上探测 ——
+     探测不到会静默退化成同一个键，不同版本又混回一起）。**一律不写 `restore-keys`**：
+     精确命中是唯一路径（§2.1），兜底键会跨发行版回读旧 `target/`，且 Cargo.lock 一变就静默
+     回退到旧桶，「命中了缓存」不再等于「缓存对得上当前依赖」。依赖变了要重暖就手跑
+     `warm-cache.yml`。缓存桶与全部版本（含 `JDK_VER` / `ANDROID_PLATFORM` /
+     `ANDROID_BUILD_TOOLS`）的唯一来源 = `tools/automation/versions.env`
      （其余 workflow 不得硬编码版本或直写缓存）。`warm-cache.yml` 保存前先按 key 删旧条目
      （**GitHub 缓存 key 不可变**，覆盖 = 先删再存；否则同键 save 被拒、旧缓存永远留着）。
+     **`warm-cache.yml` 只恢复 registry 与 cargo-tauri，`target/debug` 故意冷构建**
+     （否则「预热」退化成把现有桶原样再存一遍，验不到冷构建能不能过）；
+     **`target/release` 任何 workflow 都不保存**（太大），所以打包时 release 目标总是冷编。
    - **Linux 系统依赖**（本机与 CI 同）：`libwebkit2gtk-4.1-dev libssl-dev libxdo-dev
      librsvg2-dev libgtk-3-dev libasound2-dev pkg-config file rpm`（wry→WebKitGTK、
      cpal→ALSA、rpmbuild→rpm）；运行期还需系统 `libopus0`（缺时网络音频降级，见 §1.2）。
    - `legacy-*/` 快照与 `*.md` 改动不进 CI。
+  - **Linux 基线 = ubuntu-24.04，打包与门禁都用它（唯一一档，不分双轨）**：
+    glibc 的版本化符号**单方向兼容** —— 新 glibc 必定保留全部旧版本标签（实测 2.43 的
+    libm 同时带 `log10f@GLIBC_2.2.5` 与 `log10f@@GLIBC_2.43`），所以「老基线编的包在新
+    发行版上能跑」成立，**反过来不成立**：在 26.04 上编的包要求 `log10f@GLIBC_2.43`，
+    装到 24.04 直接 `symbol lookup error` 起不来（已实测）。**把 runner 跟 ubuntu-latest
+    对齐等于单方面砍掉老用户** —— CI 跟最新对齐只是卫生问题，两者的取舍完全相反。
+    门禁跑在最新上游上的价值（验没落后）由 `test_packages.py` 的容器档替代：deb 在
+    26.04 容器里实测能跑，正是「向前兼容成立」的直接证据（理论不值钱，容器里跑一遍才算）。
+    **下限 24.04 不是挑的**：ort 预编译包要求 glibc ≥ 2.39。唯一来源 = `versions.env` 的
+    `LINUX_RUNNER`；缓存键的发行版段是 `LINUX_CACHE_TAG=ubuntu24`（与 runner 分开是因为
+    键不可变，将来换 runner 时旧桶要靠不同的键段自然失效）。
+  - **依赖声明：deb 要手写，rpm 不要手写**（两种格式的机制不同，别当同一件事）：
+    - **deb 必须显式列** `bundle.linux.deb.depends`：dpkg **没有**自动依赖机制，Tauri 直接把它
+      写进 `Depends:`，**没有内置默认值**（`Option<Vec<String>>` → `unwrap_or_default()` → 空）。
+      忘配的后果不是构建报错，而是**发出去一个「装得上、一启动就
+      `error while loading shared libraries`」的包**，CI 全绿。门禁 `bundle` 挡「忘配」。
+    - **rpm 必须留空**（`bundle.linux.rpm.depends` 不许写，`bundle` 门禁反过来断言它为空）：
+      `rpmbuild` 从 ELF 的 `DT_NEEDED` **自动生成** `Requires`，生成的名字经 filelist 反查
+      必然正确。手写反而是错的来源 —— 曾把 Fedora 的 `libsoup3` 写成 `soup3`，安装直接
+      `nothing provides soup3`，**而且它在第一个错名就停下、后面的错一个都没暴露**。
+      自动依赖看不见的只有 dlopen 的东西，opus 因此留在 `recommends`。
+      `test_packages.py` 在 Fedora 容器里先把 `rpm -qp --requires` 的输出打进日志，
+      免得「自动依赖到底工作没有」只能靠猜。
+    - 清单**对不对**由 `test_packages.py` 在干净容器里用 `ld.so --list` 实测（缺库与缺符号
+      版本都会报）。**别用 `ldd`**：它只看库文件在不在，不看符号版本够不够，在 glibc 偏老的
+      系统上会给假绿（实测 `ldd` 输出干净而程序起不来）。
+    - 容器内断言有两条硬约束：**装完整的 `python3`**（`python3-minimal` 的标准库是裁剪过的，
+      本脚本要的 `shutil` 直接 `ModuleNotFoundError`），以及**模块级不许算仓库路径**
+      （容器里脚本挂在 `/pv/test_packages.py`，`parents[2]` 直接 `IndexError`，三项断言一项
+      都跑不到）。三档验证互相独立、一档挂了其余照跑，最后统一汇总。
+  - **Linux 产物的可信度排序**：AppImage 最兼容（linuxdeploy 把非系统库打进去）> deb
+    （限 Ubuntu 系，基线对齐后 24.04/26.04 都能跑，且容器里双向都验了）> rpm（在 Ubuntu
+    上用 rpmbuild 打的，对 Fedora 只当「拦住明显装不上」，别当兼容性证明）。
+
+### 2.8 本机开发环境（实测结论，别凭常识重推一遍）
+
+这一节全是**踩出来的**，每条都有代价，别当成可选项绕过去。
+
+- **智能体的 shell 是 Git Bash**（全局 `~/.config/opencode/opencode.jsonc` 的 `"shell"`）。
+  管道输出是标准 UTF-8，中文正常（换 PowerShell 反而全变 `?????`，见下）。
+  - 路径：`/d/PureVox`（D 盘）、`/c/Users/...`（C 盘）。**没有 `/mnt/c`**，那是 WSL 的。
+  - **命令里一律用单引号**：harness 把命令交给 `bash -c` 时**双引号会被外层吃掉**，
+    `python -c "a; b()"` 直接语法错误，`python -c 'a; b()'` 正常。带括号的 jq 表达式
+    写进临时文件再 `--jq "$(cat f)"`。
+  - **不要把 shell 指回 PowerShell**：opencode spawn PowerShell 系时一律加 `-NoProfile`，
+    `[Console]::OutputEncoding` 退回系统 ANSI 代码页（本机 936/GBK），子进程往管道写的是
+    **GBK 字节**而调用方按 UTF-8 解 → 中文全变 `?????`。实测
+    `[Console]::OutputEncoding = gb2312`、输出字节 `d6d0cec4b2e2cad4…`。
+    （曾试过装便携版 PowerShell 7 想解决，**没用** —— `-NoProfile` 同样跳过它。
+    顺带证明「换个新 shell 就好了」是想当然，已卸载，别再重装。）
+- **Windows 上只有系统自带的 PowerShell 5.1**（`powershell.exe`），仓库脚本一律别写 `.ps1`：
+  - **无 BOM 的 UTF-8 `.ps1` 按 GBK 解码**，中文把字符串引号吃掉 → 报
+    `表达式或语句中包含意外的标记`，脚本根本没跑起来。写带中文的 `.ps1` 必须存成
+    **带 BOM 的 UTF-8**，或者干脆全用 ASCII 注释。
+  - `>/dev/null` 在 PowerShell 里**不是重定向、是真路径**（会真的建出 `dev\null` 这类垃圾文件，
+    git status 里能看到）。要丢输出用 `| Out-Null`。
+  - 命令行里拼复杂逻辑（`python -c "..."`、`gh --jq '...\(...)...'`）必被嵌套引号炸掉，
+    写成脚本文件再执行。
+- **本机网络对 GitHub 不友好**，要下二进制前先看这张表：
+
+  | 目标 | 状态 | 走哪条 |
+  | --- | --- | --- |
+  | `github.com` / `api.github.com` | ✅ 通 | `gh` / `gh api` 正常 |
+  | `raw.githubusercontent.com` | ❌ DNS 解析成 `0.0.0.0` | jsDelivr `cdn.jsdelivr.net/gh/<repo>@<ref>/<path>` |
+  | GitHub release 资产 | ❌ 四个 CDN IP（`185.199.108-111.133`）全部 `000` | `gh-proxy.com`（~490 KB/s，实测最快；`ghfast.top`/`ghproxy.net` 只有 50 KB/s 左右） |
+  | `wsl --list --online` | ❌ 它要拉上面那个 raw | 直接下官方 `.wsl` 再 `wsl --install --from-file` |
+
+  - 包管理镜像：apt `mirrors.aliyun.com`、pip 清华、npm `registry.npmmirror.com`、cargo `rsproxy.cn`。
+  - **经过第三方代理下载的二进制必须校验 SHA256** —— `gh-proxy.com` 这条尤其，
+    校验值要从官方源单独取（PowerShell 的 `hashes.sha256` 就是这么验的）。
+- **Windows 上从 Python 调 `bash` 会命中 WSL 启动器**：`C:\Windows\System32\bash.exe`
+  排在 PATH 前面，它起的是 **WSL 发行版**，把 Windows 的**整个环境块丢掉**（子进程里
+  `HOME=/root`、`PATH=/usr/local/sbin:…`，传进去的 `TAG`/`VERSION` 一个都读不到，文件路径
+  也换了一套视图）。症状极其隐蔽：脚本「跑通了」，但所有环境变量都是空，很容易误判成脚本
+  自己的 bug。**要显式找 Git Bash**（`C:\Program Files\Git\bin\bash.exe`），别信 PATH ——
+  `tools/automation/run_release_stage.py` 的 `find_bash()` 就是干这个的。
+- **WSL 两个发行版**：门禁跑 **`Ubuntu-24.04`**（与 CI 基线一致，glibc 2.39；仓库挂
+  `/mnt/d/PureVox`，`~/.cargo/config.toml` 用 rsproxy **sparse**，`ORT_*` 指向 `/opt/ort`
+  的官方 release）；`Ubuntu-26.04`（glibc 2.43）留着只做**向前兼容抽查** —— 用来验证
+  「24.04 编的包在更新的 glibc 上真能跑」，别用它跑门禁（`log10f@GLIBC_2.43` 这类符号
+  会让 24.04 的产物根本起不来）。以下几条两个发行版通用：
+  - 两个发行版默认用户都是 root，systemd 已开；仓库挂 `/mnt/d/PureVox`（drvfs）。
+  - **`wsl.exe` 输出是 UTF-16**：调它之前先设 `$env:WSL_UTF8 = "1"`，否则中文全是乱码。
+  - `appendWindowsPath=false` 已关 —— 否则 PATH 里混着 Windows 的 `cargo.exe` / `nodejs`，
+    Linux 构建可能调到 Windows 的 cargo。
+  - `/root/.cargo/config.toml` 已把 `build.target-dir` 指到 `/root/purevox-target`
+    （drvfs 上 Rust 构建慢一个数量级；CI 也在 Linux 文件系统上构建，更贴近）。
+  - **`ort-sys` 绝不能让它下载**：build.rs 默认从 pyke CDN 拉 `libonnxruntime`，
+    本机连得上但**收不到数据**（实测 20 秒 0 字节；另测过 CDN 限速 10–14 KB/s，
+    一个 10 MB 的包要十几分钟）。两个发行版都改成本地已有的动态库，经
+    `/root/.cargo/config.toml` 的 `[env]` 注入 `ORT_LIB_LOCATION` / `ORT_SKIP_DOWNLOAD` /
+    `ORT_PREFER_DYNAMIC_LINK`：**24.04 用 `/opt/ort` 下官方 release 的 `.so`**
+    （走 gh-proxy.com 下载，已校验 SHA256；只含 `.so`、没有 `.a`，所以必须动态链），
+    26.04 用 apt 的 `libonnxruntime1.23` + `libonnxruntime-dev`（**CPU-only**，与 `ort`
+    的 `api-27` 对应）。**这些都是本机配置，不进仓库**，Windows 与 CI 仍走
+    `download-binaries`（CI 静态链 `ort`）。
+  - 跑门禁：`python3 tools/automation/check.py -Gate fmt|clippy|build|test|ui|version|bundle`，
+    七道已实测全绿（92 个单测通过）。
+- **构建产物位置**（找东西时别找错盘）：Windows 走 `src-tauri/target/`（D 盘，
+  一次 `clippy --all-targets` 后 `debug/deps` 能到 15 GB、`debug/incremental` 11 GB，
+  后者可随时删、零风险）；WSL 走 `/root/purevox-target/`。
+  `cargo tauri build` 约 5 分钟编译 + 4 分钟打包，产物在 `target/release/bundle/{msi,nsis}/`。
 
 ---
 
@@ -396,6 +532,16 @@ release 构建同样保留（不允许用编译开关剔除）。
   `audio/loopback_{windows,linux,other}.rs`、`audio/virtual_mic*.rs`、`hotkey*.rs`、
   `autostart*.rs`、`cues*.rs`、`net/keys*.rs`、`net/opus_sys*.rs`、`devices*.rs`、
   `debug/{mem,gpu}_*.rs`、`openurl_*.rs`。前端同理：`ui/drivers_linux.js` / `ui/drivers_windows.js`。
+- **但 Python 脚本反过来：尽可能一个 py 跨平台**（上面那条只管 `.rs` 与前端 JS）。理由：脚本
+  的平台差异通常只有「产物格式 / 安装方式 / 启动前缀 / 收尾命令」各自三五行，拆成三个文件
+  只会让「这件事到底做了哪几步」要跨文件拼起来才看得全；而它们本来就是**每个都要全跑一遍**
+  的一次性工具，不进运行时。跨平台靠 `sys.platform` 分支，不靠文件。同理，**容器里跑的断言
+  不要再嵌一段 bash** —— 让脚本自己兼任容器内入口（`test_packages.py --in-container`），
+  这样宿主侧与容器侧的检查是同一份实现，不会各自漂移。
+  **禁止**在 Python 里出现 `subprocess.run(["pkill", ...])` 这类「本机有、runner 没有」的调用：
+  Windows 的 Git for Windows 不带 procps（`usr/bin` / `mingw64/bin` 都没有 `pkill`），
+  会抛 `FileNotFoundError`；且这类调用常挂在 `finally` 上，**成功也会炸**。
+  平台收尾用系统自带的东西：Windows `taskkill /F /T /PID`、Linux `os.killpg`。
 - **许可证头**：每个源码文件（`.rs` / `.toml` / `.html` / `.js` / `.ts` / `.css` 等）顶部必须带 GPL-3.0 版权头 +
   模型声明 + `SPDX-License-Identifier: GPL-3.0-or-later`，照抄 `src-tauri/src/main.rs` 顶部并按注释风格替换。
   JSON 无注释语法，豁免。

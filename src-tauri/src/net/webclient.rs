@@ -92,7 +92,7 @@ input[type=text]{font:inherit;width:100%;color:var(--fg);background:#18202a;bord
 <div class="note" id="caps"></div>
 
 <input type="text" id="text" placeholder="在此打字，发到电脑…" autocomplete="off" enterkeyhint="send">
-<div class="note">用系统的「全键盘」发送按键可能比这排虚拟键好用；两���可以并用。</div>
+<div class="note">用系统的「全键盘」发送按键可能比这排虚拟键好用；两者可以并用。</div>
 
 <div class="keys" id="kb"><div class="kb">
   <div class="krow" id="r0"></div><div class="krow" id="r1"></div>
