@@ -35,6 +35,18 @@
     <string name="msg_no_target">请先填写电脑的 IP 或主机名（没搜到时可以手动填）</string>
     <string name="msg_proto_mismatch">电脑端协议版本 %2$d 与本客户端 %1$d 不一致，请更新客户端</string>
 
+    <!-- 卡片标题 -->
+    <string name="section_connect">连接</string>
+    <string name="section_function">功能</string>
+    <string name="section_input">远程输入</string>
+    <string name="section_keepalive">后台保活</string>
+    <string name="section_update">更新</string>
+
+    <!-- 诊断区（默认收起） -->
+    <string name="diag_title">诊断</string>
+    <string name="diag_show">诊断　▸ 点此展开</string>
+    <string name="diag_hide">诊断　▾ 点此收起</string>
+
     <!-- 状态读数（固定行数，与 MainActivity.updateStatus 一一对应） -->
     <string name="status_conn">连接状态</string>
     <string name="status_host">电脑地址</string>
@@ -46,24 +58,48 @@
     <string name="status_health">自检　</string>
 
     <!-- 功能开关 -->
-    <string name="section_function">功能</string>
     <string name="sw_mic">手机麦克风 → 电脑</string>
     <string name="sw_speaker">电脑音频 → 手机扬声器</string>
-    <string name="sw_remote">远程输入（电脑端默认关闭）</string>
+    <string name="sw_remote">远程输入开关（电脑端默认关闭）</string>
     <string name="sw_remote_text">打字同步（输入法文本 → 电脑）</string>
     <string name="sw_remote_keys">实体键盘（手机按键 → 电脑）</string>
 
-    <!-- 输入框 -->
-    <string name="section_input">输入</string>
+    <!-- 输入框 / 长文本 -->
     <string name="hint_text_local">在此输入（仅本机；打开「打字同步」后内容会转发给电脑）</string>
     <string name="hint_text_synced">在此输入，内容会转发给电脑后清空</string>
+    <string name="btn_send">发送</string>
+    <string name="btn_clear">清空</string>
+    <string name="msg_sent">已发送 %1$d 个字符</string>
+    <string name="msg_send_blocked">未连接，或「远程输入 / 打字同步」未开启</string>
 
-    <!-- 日志 -->
-    <string name="section_log">日志</string>
+    <!-- 后台保活 -->
+    <string name="keepalive_desc">推流期间会常驻前台服务通知（带「停止 / 断开」按钮）。再允许「忽略电池优化」，息屏久一点也不会被系统冻结。</string>
+    <string name="btn_battery_settings">忽略电池优化设置</string>
+    <string name="battery_ignored">电池优化：已忽略 ✓（后台不易被冻结）</string>
+    <string name="battery_not_ignored">电池优化：未忽略（息屏久了可能被冻结）</string>
 
     <!-- 前台服务通知 -->
     <string name="notif_channel_name">麦克风推流</string>
     <string name="notif_channel_desc">保持麦克风在后台可用</string>
     <string name="notif_starting">正在启动麦克风…</string>
     <string name="notif_default">正在推流</string>
+    <string name="notif_connected">已连接电脑（后台保活）</string>
+    <string name="notif_action_stop">停止推流</string>
+    <string name="notif_action_disconnect">断开连接</string>
+
+    <!-- 更新 -->
+    <string name="btn_check_update">检查更新</string>
+    <string name="btn_download">下载更新</string>
+    <string name="btn_install">安装</string>
+    <string name="update_installed">本机版本：%1$s（%2$s）</string>
+    <string name="update_checking">正在检查更新…</string>
+    <string name="update_uptodate">已是最新版本</string>
+    <string name="update_dev_build">开发构建（没有版本时间戳），无法比较新旧</string>
+    <string name="update_available">发现新版本：%1$s</string>
+    <string name="update_downloading">正在下载… %1$d%%</string>
+    <string name="update_downloaded">下载完成，点击「安装」</string>
+    <string name="update_failed">检查更新失败：%1$s</string>
+    <string name="update_install_denied">需要先在系统设置里允许本应用「安装未知应用」</string>
+    <string name="update_install_started">已调起系统安装程序</string>
+    <string name="update_no_apk">该版本没有可用的 APK 资产</string>
 </resources>

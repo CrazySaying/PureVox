@@ -18,10 +18,15 @@
   SPDX-License-Identifier: GPL-3.0-or-later
 -->
 <!--
-  单界面：连接 → 读数 → 三个功能开关（远程输入再分打字/键盘）→ 输入框 → 日志。
-  唯一滚动区域是这一个 ScrollView；布局里不放任何计算逻辑。
+  单界面，卡片式布局：连接 / 功能 / 远程输入 / 后台保活 / 更新，最后是可折叠的诊断区
+  （连接读数 + 日志，默认收起，标题行点击展开）。唯一滚动区域是这一个 ScrollView；
+  布局里不放任何计算逻辑。
+
+  **不用固定高度**：每张卡片 `wrap_content`，内容随语言/字号自然伸缩（AGENTS §1.3
+  「界面不要写死高度」）。需要「数值不跳动」的地方靠等宽字体（PvStatus 用 monospace）。
 -->
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:fillViewport="true">
@@ -30,12 +35,13 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:padding="16dp">
+        android:padding="12dp">
 
         <!-- 标题 -->
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
+            android:layout_marginStart="4dp"
             android:letterSpacing="0.06"
             android:text="@string/app_name"
             android:textColor="?android:attr/textColorPrimary"
@@ -45,177 +51,383 @@
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="10dp"
+            android:layout_marginStart="4dp"
+            android:layout_marginBottom="8dp"
             android:text="@string/subtitle"
             android:textColor="?android:attr/textColorSecondary"
             android:textSize="11sp" />
 
-        <!-- 连接 -->
+        <!-- ============================ 连接 ============================ -->
+        <com.google.android.material.card.MaterialCardView
+            style="@style/Widget.Material3.CardView.Outlined"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="14dp">
+
+                <TextView
+                    style="@style/PvCardTitle"
+                    android:text="@string/section_connect" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <EditText
+                        android:id="@+id/etHost"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:autofillHints=""
+                        android:hint="@string/hint_host"
+                        android:importantForAutofill="no"
+                        android:inputType="textUri"
+                        android:maxLines="1"
+                        android:textSize="14sp" />
+
+                    <Button
+                        android:id="@+id/btnConnect"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp"
+                        android:minWidth="88dp"
+                        android:text="@string/btn_connect"
+                        android:textAllCaps="false" />
+                </LinearLayout>
+
+                <!--
+                  「重新发现」与「重新连接」是**两件事**，所以是两个按钮（DESIGN.md §4.1.1）：
+                    重新发现 = 换了 Wi-Fi / 刚才没搜到 → 停掉 NsdManager 再 discover（要等几秒）
+                    重新连接 = 只是掉线、服务还在    → 只重连 WebSocket（立刻就好）
+                  分开是为了让用户在正确的时机做正确的事：只是掉线却去重新发现，会白等那几秒。
+                  电脑上没跑服务时搜不到是**预期行为**，所以这两个按钮任何时候都可用。
+                -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal">
+
+                    <Button
+                        android:id="@+id/btnRediscover"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:minWidth="0dp"
+                        android:text="@string/btn_rediscover"
+                        android:textAllCaps="false"
+                        android:textSize="12sp" />
+
+                    <Button
+                        android:id="@+id/btnReconnect"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:minWidth="0dp"
+                        android:text="@string/btn_reconnect"
+                        android:textAllCaps="false"
+                        android:textSize="12sp" />
+                </LinearLayout>
+
+                <Button
+                    android:id="@+id/btnHealth"
+                    style="@style/Widget.Material3.Button.TextButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/btn_health"
+                    android:textAllCaps="false"
+                    android:textSize="12sp" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <!-- ============================ 功能 ============================ -->
+        <com.google.android.material.card.MaterialCardView
+            style="@style/Widget.Material3.CardView.Outlined"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="14dp">
+
+                <TextView
+                    style="@style/PvCardTitle"
+                    android:text="@string/section_function" />
+
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/swMic"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:minHeight="44dp"
+                    android:text="@string/sw_mic"
+                    android:textSize="14sp" />
+
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/swSpeaker"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:minHeight="44dp"
+                    android:text="@string/sw_speaker"
+                    android:textSize="14sp" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <!-- ========================= 远程输入 ========================= -->
+        <com.google.android.material.card.MaterialCardView
+            style="@style/Widget.Material3.CardView.Outlined"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="14dp">
+
+                <TextView
+                    style="@style/PvCardTitle"
+                    android:text="@string/section_input" />
+
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/swRemote"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:minHeight="44dp"
+                    android:text="@string/sw_remote"
+                    android:textSize="14sp" />
+
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/swRemoteText"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="20dp"
+                    android:minHeight="44dp"
+                    android:text="@string/sw_remote_text"
+                    android:textSize="13sp" />
+
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/swRemoteKeys"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="20dp"
+                    android:minHeight="44dp"
+                    android:text="@string/sw_remote_keys"
+                    android:textSize="13sp" />
+
+                <!-- 输入框：承接输入法已组合文本；空框里按退格会把删除键转发给电脑 -->
+                <com.purevox.mic.PvEditText
+                    android:id="@+id/etText"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:autofillHints=""
+                    android:hint="@string/hint_text_local"
+                    android:importantForAutofill="no"
+                    android:inputType="textMultiLine|textCapSentences"
+                    android:maxLines="6"
+                    android:minHeight="56dp"
+                    android:textSize="14sp" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:orientation="horizontal">
+
+                    <Button
+                        android:id="@+id/btnSend"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:minWidth="0dp"
+                        android:text="@string/btn_send"
+                        android:textAllCaps="false"
+                        android:textSize="13sp" />
+
+                    <Button
+                        android:id="@+id/btnClear"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:minWidth="0dp"
+                        android:text="@string/btn_clear"
+                        android:textAllCaps="false"
+                        android:textSize="13sp" />
+                </LinearLayout>
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <!-- ========================= 后台保活 ========================= -->
+        <com.google.android.material.card.MaterialCardView
+            style="@style/Widget.Material3.CardView.Outlined"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="14dp">
+
+                <TextView
+                    style="@style/PvCardTitle"
+                    android:text="@string/section_keepalive" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/keepalive_desc"
+                    android:textColor="?android:attr/textColorSecondary"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/tvBattery"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:text="@string/battery_not_ignored"
+                    android:textSize="12sp" />
+
+                <Button
+                    android:id="@+id/btnBattery"
+                    style="@style/Widget.Material3.Button.TextButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/btn_battery_settings"
+                    android:textAllCaps="false"
+                    android:textSize="12sp" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <!-- =========================== 更新 =========================== -->
+        <com.google.android.material.card.MaterialCardView
+            style="@style/Widget.Material3.CardView.Outlined"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="14dp">
+
+                <TextView
+                    style="@style/PvCardTitle"
+                    android:text="@string/section_update" />
+
+                <TextView
+                    android:id="@+id/tvUpdate"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:textSize="13sp" />
+
+                <Button
+                    android:id="@+id/btnCheckUpdate"
+                    style="@style/Widget.Material3.Button.TextButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/btn_check_update"
+                    android:textAllCaps="false"
+                    android:textSize="12sp" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal">
+
+                    <Button
+                        android:id="@+id/btnDownload"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:enabled="false"
+                        android:minWidth="0dp"
+                        android:text="@string/btn_download"
+                        android:textAllCaps="false"
+                        android:textSize="12sp" />
+
+                    <Button
+                        android:id="@+id/btnInstall"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp"
+                        android:layout_weight="1"
+                        android:enabled="false"
+                        android:minWidth="0dp"
+                        android:text="@string/btn_install"
+                        android:textAllCaps="false"
+                        android:textSize="12sp" />
+                </LinearLayout>
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <!-- ================= 诊断（默认收起，标题行点击展开） ================= -->
+        <TextView
+            android:id="@+id/tvDiagHeader"
+            style="@style/PvCardTitle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:background="?attr/selectableItemBackground"
+            android:clickable="true"
+            android:focusable="true"
+            android:paddingStart="4dp"
+            android:paddingTop="6dp"
+            android:paddingEnd="4dp"
+            android:paddingBottom="6dp"
+            android:text="@string/diag_show" />
+
         <LinearLayout
+            android:id="@+id/llDiag"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:gravity="center_vertical"
-            android:orientation="horizontal">
+            android:orientation="vertical"
+            android:visibility="gone">
 
-            <EditText
-                android:id="@+id/etHost"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:autofillHints=""
-                android:hint="@string/hint_host"
-                android:importantForAutofill="no"
-                android:inputType="textUri"
-                android:maxLines="1"
-                android:textSize="14sp" />
+            <TextView
+                android:id="@+id/tvStatus"
+                style="@style/PvStatus"
+                android:layout_marginTop="4dp" />
 
-            <Button
-                android:id="@+id/btnConnect"
-                android:layout_width="wrap_content"
+            <TextView
+                android:id="@+id/tvHealth"
+                style="@style/PvStatus"
+                android:layout_marginTop="6dp"
+                android:textSize="10sp" />
+
+            <TextView
+                android:id="@+id/tvErr"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginStart="8dp"
-                android:minWidth="92dp"
-                android:text="@string/btn_connect"
-                android:textAllCaps="false" />
+                android:layout_marginTop="6dp"
+                android:textColor="@color/pv_err"
+                android:textSize="11sp"
+                android:visibility="gone" />
+
+            <TextView
+                android:id="@+id/tvLog"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:layout_marginBottom="16dp"
+                android:fontFamily="monospace"
+                android:lineSpacingExtra="2dp"
+                android:textColor="?android:attr/textColorSecondary"
+                android:textSize="10sp" />
         </LinearLayout>
-
-        <!--
-          「重新发现」与「重新连接」是**两件事**，所以是两个按钮（DESIGN.md §4.1.1）：
-            重新发现 = 换了 Wi-Fi / 刚才没搜到 → 停掉 NsdManager 再 discover（要等几秒）
-            重新连接 = 只是掉线、服务还在    → 只重连 WebSocket（立刻就好）
-          分开是为了让用户在正确的时机做正确的事：只是掉线却去重新发现，会白等那几秒。
-          电脑上没跑服务时搜不到是**预期行为**，所以这两个按钮任何时候都可用。
-        -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal">
-
-            <Button
-                android:id="@+id/btnRediscover"
-                style="@style/Widget.Material3.Button.TextButton"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="@string/btn_rediscover"
-                android:textAllCaps="false" />
-
-            <Button
-                android:id="@+id/btnReconnect"
-                style="@style/Widget.Material3.Button.TextButton"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="@string/btn_reconnect"
-                android:textAllCaps="false" />
-        </LinearLayout>
-
-        <Button
-            android:id="@+id/btnHealth"
-            style="@style/Widget.Material3.Button.TextButton"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="@string/btn_health"
-            android:textAllCaps="false" />
-
-        <!-- 状态读数（固定 7 行 + 自检行 + 错误行） -->
-        <TextView
-            android:id="@+id/tvStatus"
-            style="@style/PvStatus"
-            android:layout_marginTop="8dp" />
-
-        <TextView
-            android:id="@+id/tvHealth"
-            style="@style/PvStatus"
-            android:layout_marginTop="6dp"
-            android:textSize="10sp" />
-
-        <TextView
-            android:id="@+id/tvErr"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="6dp"
-            android:textColor="@color/pv_err"
-            android:textSize="11sp"
-            android:visibility="gone" />
-
-        <!-- 功能开关 -->
-        <TextView
-            style="@style/PvSectionTitle"
-            android:text="@string/section_function" />
-
-        <com.google.android.material.materialswitch.MaterialSwitch
-            android:id="@+id/swMic"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:minHeight="44dp"
-            android:text="@string/sw_mic"
-            android:textSize="14sp" />
-
-        <com.google.android.material.materialswitch.MaterialSwitch
-            android:id="@+id/swSpeaker"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:minHeight="44dp"
-            android:text="@string/sw_speaker"
-            android:textSize="14sp" />
-
-        <com.google.android.material.materialswitch.MaterialSwitch
-            android:id="@+id/swRemote"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:minHeight="44dp"
-            android:text="@string/sw_remote"
-            android:textSize="14sp" />
-
-        <com.google.android.material.materialswitch.MaterialSwitch
-            android:id="@+id/swRemoteText"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="20dp"
-            android:minHeight="44dp"
-            android:text="@string/sw_remote_text"
-            android:textSize="13sp" />
-
-        <com.google.android.material.materialswitch.MaterialSwitch
-            android:id="@+id/swRemoteKeys"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="20dp"
-            android:minHeight="44dp"
-            android:text="@string/sw_remote_keys"
-            android:textSize="13sp" />
-
-        <!-- 输入框：承接输入法已组合文本 -->
-        <TextView
-            style="@style/PvSectionTitle"
-            android:text="@string/section_input" />
-
-        <EditText
-            android:id="@+id/etText"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:autofillHints=""
-            android:hint="@string/hint_text_local"
-            android:importantForAutofill="no"
-            android:inputType="textMultiLine|textCapSentences"
-            android:maxLines="4"
-            android:minHeight="48dp"
-            android:textSize="14sp" />
-
-        <!-- 日志 -->
-        <TextView
-            style="@style/PvSectionTitle"
-            android:text="@string/section_log" />
-
-        <TextView
-            android:id="@+id/tvLog"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginBottom="16dp"
-            android:fontFamily="monospace"
-            android:lineSpacingExtra="2dp"
-            android:textColor="?android:attr/textColorSecondary"
-            android:textSize="10sp" />
     </LinearLayout>
 </ScrollView>

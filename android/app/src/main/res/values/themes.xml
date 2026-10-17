@@ -34,6 +34,17 @@
         <item name="android:textColor">?android:attr/textColorSecondary</item>
     </style>
 
+    <!-- 卡片标题：比 PvSectionTitle 更醒目一点（品牌色 + 稍大 + 加粗），不写死高度 -->
+    <style name="PvCardTitle">
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:layout_marginBottom">6dp</item>
+        <item name="android:textSize">13sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:letterSpacing">0.04</item>
+        <item name="android:textColor">@color/pv_accent</item>
+    </style>
+
     <style name="PvStatus">
         <item name="android:layout_width">match_parent</item>
         <item name="android:layout_height">wrap_content</item>

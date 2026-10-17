@@ -21,9 +21,16 @@
     RECORD_AUDIO                      手机麦克风 -> 电脑（Android 9+ 后台受限，故配前台服务）
     FOREGROUND_SERVICE                 推流期间保持前台服务
     FOREGROUND_SERVICE_MICROPHONE      Android 14+ 的 microphone 前台服务类型
+    FOREGROUND_SERVICE_DATA_SYNC       Android 14+：会话保活兼作 dataSync（连接期间常在）
     POST_NOTIFICATIONS                 Android 13+ 前台服务通知可见
     INTERNET / ACCESS_NETWORK_STATE    ws:// 与 /health 自检
     WAKE_LOCK                         推流期间不熄屏（音频线程）
+    REQUEST_INSTALL_PACKAGES           应用内更新：把下载好的 APK 交给系统安装器
+    REQUEST_IGNORE_BATTERY_OPTIMIZATIONS  应用内更新/推流：请求忽略电池优化（保活）
+
+  组件：
+    CaptureService   前台服务（microphone + dataSync），常驻通知带「停止 / 断开」按钮
+    FileProvider     应用内更新下载的 APK 通过它交给系统安装器（见 res/xml/file_paths.xml）
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
@@ -35,6 +42,11 @@
         android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- 应用内更新：安装下载好的 APK（Android 8+ 为每应用开关，见 UpdateInstaller） -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- 保活：请求把本应用排除出电池优化（由用户在系统弹窗里确认） -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <uses-feature
         android:name="android.hardware.microphone"
@@ -64,6 +76,17 @@
         <service
             android:name=".service.CaptureService"
             android:exported="false"
-            android:foregroundServiceType="microphone" />
+            android:foregroundServiceType="microphone|dataSync" />
+
+        <!-- 应用内更新：把私有目录里下载好的 APK 通过 FileProvider 交给系统安装器 -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 </manifest>

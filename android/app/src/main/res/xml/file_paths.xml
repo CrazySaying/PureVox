@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  PureVox — AI 麦克风降噪工具
+  Copyright (C) 2024-2026 a2heng <752848283@qq.com>
+
+  PureVox is licensed under the GNU General Public License v3.0 or
+  later (GPL-3.0-or-later).  See LICENSE for details.
+
+  This program is free software: you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation, either version 3 of the License, or
+  (at your option) any later version.
+
+  The built-in AI models are NOT covered by the GPL; they are the
+  property of a2heng and may only be used with PureVox under
+  authorization.  See MODEL-LICENSE.md for details.
+
+  SPDX-License-Identifier: GPL-3.0-or-later
+-->
+<!--
+  FileProvider 暴露给系统安装器的唯一路径：应用私有外部目录下的 `update/`（应用内更新
+  下载的 APK 就落在那儿，见 `update/UpdateDownloader.kt`）。**只暴露这一个子目录**，
+  其余私有文件不外泄。
+-->
+<paths>
+    <external-files-path
+        name="update"
+        path="update/" />
+</paths>

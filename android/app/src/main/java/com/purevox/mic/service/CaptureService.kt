@@ -36,15 +36,18 @@ import com.purevox.mic.MainActivity
 import com.purevox.mic.R
 
 /**
- * 麦克风推流的前台服务。
+ * 会话前台服务（**保活**）。
  *
- * 职责很窄，就三件事（Android 9+ 没有前台服务就拿不到后台麦克风）：
- * 1. 挂一个常驻通知（用户可见的「正在用麦克风」提示）；
- * 2. 持一个 PARTIAL_WAKE_LOCK，保证息屏时音频线程不被挂起；
- * 3. 声明 `foregroundServiceType="microphone"`（Android 14+ 强制要求）。
+ * 职责很窄：挂一个常驻通知 + 持一把 PARTIAL_WAKE_LOCK，让系统别把本进程冻结 ——
+ * 音频与网络线程都在界面进程里，没有前台服务，Android 9+ 后台拿不到麦克风、Android 12+
+ * 还会被系统直接掐掉。
  *
- * **音频管线不在这里**（在 `MainActivity` 持有的 `MicUplink` 里）。这是刻意的：
- * 界面是唯一的编排者，服务只提供「合法地继续用麦克风」的环境。
+ * **服务范围 = 整个会话，不是只有麦克风**：只要「已连接」或「正在推流」就常驻，
+ * 通知里的两个按钮（[BROADCAST_NOTIF_STOP] / [BROADCAST_NOTIF_DISCONNECT]）由界面
+ * （[MainActivity]）接收并处理 —— 服务本身不认识协议，**界面是唯一的编排者**。
+ *
+ * 前台服务类型：麦克风在用时 `microphone|dataSync`，只是保活连接时 `dataSync`。
+ * 哪个在用就报哪个（Android 14 起按实际用途校验，不能超报）。
  */
 class CaptureService : Service() {
 
@@ -55,44 +58,59 @@ class CaptureService : Service() {
         const val ACTION_UPDATE = "com.purevox.mic.action.UPDATE"
         const val ACTION_STOP = "com.purevox.mic.action.STOP"
 
-        /** 通知正文（由界面刷新，用来显示已推包数 / 采集格式）。 */
+        /**
+         * 通知按钮发回界面的广播（**不是**服务自己的 action）。
+         * 「停止推流」= 关麦克风链路；「断开连接」= 断开 WebSocket。两件事分开。
+         */
+        const val BROADCAST_NOTIF_STOP = "com.purevox.mic.notif.STOP"
+        const val BROADCAST_NOTIF_DISCONNECT = "com.purevox.mic.notif.DISCONNECT"
+
+        /** 通知正文（由界面刷新，用来显示已推包数 / 采集格式 / 保活状态）。 */
         const val EXTRA_TEXT = "text"
+
+        /** 本条通知是否包含 `microphone` 前台服务类型。 */
+        const val EXTRA_MIC = "mic"
 
         const val CHANNEL_ID = "purevox_mic_stream"
         const val NOTIFICATION_ID = 1001
 
         private const val WAKE_LOCK_TAG = "PureVoxMic:AudioWakeLock"
 
-        fun start(ctx: Context, text: String) {
-            val intent = Intent(ctx, CaptureService::class.java).apply {
-                action = ACTION_START
-                putExtra(EXTRA_TEXT, text)
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                ctx.startForegroundService(intent)
-            } else {
-                ctx.startService(intent)
-            }
-        }
+        fun start(ctx: Context, text: String, mic: Boolean) =
+            deliver(ctx, ACTION_START, text, mic)
 
-        fun update(ctx: Context, text: String) {
-            val intent = Intent(ctx, CaptureService::class.java).apply {
-                action = ACTION_UPDATE
-                putExtra(EXTRA_TEXT, text)
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                ctx.startForegroundService(intent)
-            } else {
-                ctx.startService(intent)
-            }
-        }
+        fun update(ctx: Context, text: String, mic: Boolean) =
+            deliver(ctx, ACTION_UPDATE, text, mic)
 
         fun stop(ctx: Context) {
             ctx.stopService(Intent(ctx, CaptureService::class.java))
         }
+
+        private fun deliver(ctx: Context, action: String, text: String, mic: Boolean) {
+            val intent = Intent(ctx, CaptureService::class.java).apply {
+                this.action = action
+                putExtra(EXTRA_TEXT, text)
+                putExtra(EXTRA_MIC, mic)
+            }
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    ctx.startForegroundService(intent)
+                } else {
+                    ctx.startService(intent)
+                }
+            } catch (e: Throwable) {
+                // Android 12+ 从后台起前台服务会抛 ForegroundServiceStartNotAllowedException。
+                // 这里不能让它炸掉界面：保活失败只是「没通知」，连接与推流照常。日志留痕。
+                Log.e(TAG, "起前台服务失败（保活未生效）", e)
+            }
+        }
     }
 
     private var wakeLock: PowerManager.WakeLock? = null
+
+    /** 本次会话当前是否含麦克风（决定前台服务类型掩码）。 */
+    @Volatile
+    private var micActive = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -105,8 +123,9 @@ class CaptureService : Service() {
         when (intent?.action) {
             ACTION_START, ACTION_UPDATE -> {
                 val text = intent.getStringExtra(EXTRA_TEXT) ?: getString(R.string.notif_default)
+                micActive = intent.getBooleanExtra(EXTRA_MIC, false)
                 acquireWakeLock()
-                startForegroundCompat(text)
+                startForegroundCompat(text, micActive)
             }
             ACTION_STOP -> {
                 releaseWakeLock()
@@ -127,11 +146,17 @@ class CaptureService : Service() {
     // ---------------------------------------------------------------- 内部
 
     @Suppress("DEPRECATION")
-    private fun startForegroundCompat(text: String) {
+    private fun startForegroundCompat(text: String, mic: Boolean) {
         val notification = buildNotification(text)
+        val type = when {
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.Q -> 0   // 走两参重载
+            mic -> ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            else -> ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+        }
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+            if (type != 0) {
+                startForeground(NOTIFICATION_ID, notification, type)
             } else {
                 startForeground(NOTIFICATION_ID, notification)
             }
@@ -170,19 +195,31 @@ class CaptureService : Service() {
 
     private fun buildNotification(text: String): Notification {
         val launch = packageManager.getLaunchIntentForPackage(packageName)
-        val pi = launch?.let {
+        val contentPi = launch?.let {
             PendingIntent.getActivity(this, 0, it, PendingIntent.FLAG_IMMUTABLE)
         }
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.app_name))
             .setContentText(text)
             .setSmallIcon(R.drawable.ic_stat_mic)
-            .setContentIntent(pi)
+            .setContentIntent(contentPi)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .addAction(0, getString(R.string.notif_action_stop), broadcast(BROADCAST_NOTIF_STOP, 1))
+            .addAction(
+                0,
+                getString(R.string.notif_action_disconnect),
+                broadcast(BROADCAST_NOTIF_DISCONNECT, 2),
+            )
             .build()
+    }
+
+    /** 通知按钮 → 广播（限本应用 `setPackage`，接收端是 MainActivity 的动态接收器）。 */
+    private fun broadcast(action: String, requestCode: Int): PendingIntent {
+        val intent = Intent(action).setPackage(packageName)
+        return PendingIntent.getBroadcast(this, requestCode, intent, PendingIntent.FLAG_IMMUTABLE)
     }
 
     private fun acquireWakeLock() {

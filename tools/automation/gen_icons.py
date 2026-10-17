@@ -84,6 +84,11 @@ P_BOX_ALL = (90.0, 24.0, 421.0, 518.0)   # 含描边的整体包围盒（332×49
 FILL = (0x64, 0xB4, 0xFF)    # P 本体 浅蓝
 EDGE = (0x0F, 0x23, 0x50)    # P 描边 深蓝
 
+# 自适应图标的 monochrome 层（Android 13+ 主题图标）：**只有 alpha 有意义**，
+# 系统会拿它当蒙版整体着色。所以画成一整块单色剪影（描边与本体同色），
+# 颜色随便选白色即可，别「按设计稿上色」——那会被系统丢掉。
+MONO = (0xFF, 0xFF, 0xFF)
+
 BG_TOP = (0x10, 0x2F, 0x5D)
 BG_BOTTOM = (0x1E, 0x6F, 0xD0)
 CORNER_R = 110.0 / 512.0      # 圆角半径 / 边长
@@ -121,15 +126,20 @@ def _vgradient(size: int, top: tuple, bottom: tuple) -> Image.Image:
 
 
 def draw_player(img: Image.Image, scale: float, off_x: float, off_y: float,
-                dark: bool = False) -> None:
+                dark: bool = False, mono: bool = False) -> None:
     """按给定缩放与偏移把 P 画到 ``img`` 上。
 
     注意 Pillow 的 ``rectangle`` 端点**含**、GDI+ 的 ``FillRectangle`` 是「起点 + 宽高」，
     所以右/下边界要减 1，否则每块胖 1 像素、含描边包围盒会从 332×495 变成 334×497。
+
+    ``mono=True`` 时描边与本体同色（[MONO]）—— 只留剪影给系统着色，见 [MONO] 的说明。
     """
     d = ImageDraw.Draw(img)
-    fill = TRAY_STOPPED_FILL if dark else FILL
-    edge = TRAY_STOPPED_EDGE if dark else EDGE
+    if mono:
+        fill = edge = MONO
+    else:
+        fill = TRAY_STOPPED_FILL if dark else FILL
+        edge = TRAY_STOPPED_EDGE if dark else EDGE
 
     # 先画描边：每个盒子向外扩 STROKE（方形），相邻盒子的外扩自然合并
     for x0, y0, x1, y1 in P_BOXES:
@@ -156,17 +166,18 @@ def draw_player(img: Image.Image, scale: float, off_x: float, off_y: float,
 
 
 def draw_player_centered(img: Image.Image, big: int, p_ratio: float,
-                         dark: bool = False) -> None:
+                         dark: bool = False, mono: bool = False) -> None:
     """P 按自然包围盒等比缩放（高 = big × p_ratio）后居中。"""
     pw = P_BOX_ALL[2] - P_BOX_ALL[0] + 1
     ph = P_BOX_ALL[3] - P_BOX_ALL[1] + 1
     scale = (big * p_ratio) / ph
     off_x = (big - pw * scale) / 2 - P_BOX_ALL[0] * scale
     off_y = (big - ph * scale) / 2 - P_BOX_ALL[1] * scale
-    draw_player(img, scale, off_x, off_y, dark)
+    draw_player(img, scale, off_x, off_y, dark, mono)
 
 
-def render(size: int, shape: str, p_ratio: float, dark: bool = False) -> Image.Image:
+def render(size: int, shape: str, p_ratio: float, dark: bool = False,
+           mono: bool = False) -> Image.Image:
     """画一个 size×size 的图标。
 
     shape: full（满幅无圆角，iOS/macOS）/ squircle（圆角矩形）/ round（圆）/
@@ -175,7 +186,7 @@ def render(size: int, shape: str, p_ratio: float, dark: bool = False) -> Image.I
     big = size * SUPERSAMPLE
     img = Image.new("RGBA", (big, big), (0, 0, 0, 0))
     if shape == "none":
-        draw_player_centered(img, big, p_ratio, dark)
+        draw_player_centered(img, big, p_ratio, dark, mono)
         return img.resize((size, size), _LANCZOS)
 
     top = TRAY_STOPPED_TOP if dark else BG_TOP
@@ -193,7 +204,7 @@ def render(size: int, shape: str, p_ratio: float, dark: bool = False) -> Image.I
     # 用 mask 上色：渐变本身铺满，形状交给 mask —— 比先生成带 alpha 的渐变再合成省事
     img.paste(_vgradient(big, top, bottom), (0, 0), mask)
 
-    draw_player_centered(img, big, p_ratio, dark)
+    draw_player_centered(img, big, p_ratio, dark, mono)
     return img.resize((size, size), _LANCZOS)
 
 
@@ -323,6 +334,42 @@ IOS_SLOTS = (
 
 GROUPS = ("Source", "Bundle", "Store", "Macos", "Ios", "Tray", "Android")
 
+# Android 自适应图标的**声明文件**（mipmap-anydpi-v26/）。由脚本一并写出，
+# 免得「图标=脚本产物、XML=手改」两头漂移（曾经 XML 的注释还写着早已不存在的
+# gen_icons.sh|.ps1）。背景是桌面版同款深蓝渐变（`ic_launcher_bg`，手写、不在这里生成），
+# 前景与 monochrome 都是本脚本的 PNG 产物。monochrome 供 Android 13+ 主题图标取用。
+ADAPTIVE_XML = """<?xml version="1.0" encoding="utf-8"?>
+<!-- 由 tools/automation/gen_icons.py 生成，请勿手改（改图标改脚本再全量重跑）。
+
+     PureVox — AI 麦克风降噪工具
+     Copyright (C) 2024-2026 a2heng <752848283@qq.com>
+
+     PureVox is licensed under the GNU General Public License v3.0 or
+     later (GPL-3.0-or-later).  See LICENSE for details.
+
+     The built-in AI models are NOT covered by the GPL; they are the
+     property of a2heng and may only be used with PureVox under
+     authorization.  See MODEL-LICENSE.md for details.
+
+     SPDX-License-Identifier: GPL-3.0-or-later
+
+     自适应图标（API 26+）：背景是桌面版同款深蓝竖向渐变（满幅无圆角，系统自己裁形状）；
+     前景 P 落在中央 72dp 安全区内；monochrome 是单色剪影，供 Android 13+ 主题图标着色。
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+  <background android:drawable="@drawable/ic_launcher_bg"/>
+  <foreground android:drawable="@mipmap/ic_launcher_foreground"/>
+  <monochrome android:drawable="@mipmap/ic_launcher_monochrome"/>
+</adaptive-icon>
+"""
+
+
+def write_adaptive_xml(anydpi_dir: Path) -> None:
+    """写 `mipmap-anydpi-v26/` 下的自适应图标声明：方形与圆形都指向同一套层。"""
+    anydpi_dir.mkdir(parents=True, exist_ok=True)
+    for fn in ("ic_launcher.xml", "ic_launcher_round.xml"):
+        (anydpi_dir / fn).write_text(ADAPTIVE_XML, encoding="utf-8", newline="\n")
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="生成 PureVox 全部平台的图标产物")
@@ -425,8 +472,11 @@ def main() -> int:
             save_png(render(legacy, "squircle", P_IN_LEGACY), d / "ic_launcher.png")
             save_png(render(legacy, "round", P_IN_LEGACY), d / "ic_launcher_round.png")
             save_png(render(fg, "none", P_IN_ADAPTIVE), d / "ic_launcher_foreground.png")
-        print(f"[Android] mipmap {len(ANDROID_DENSITIES)} 档 × 3"
-              f"（round 用 {SUPERSAMPLE}× 超采样，圆边不再是台阶）")
+            save_png(render(fg, "none", P_IN_ADAPTIVE, mono=True), d / "ic_launcher_monochrome.png")
+        write_adaptive_xml(res / "mipmap-anydpi-v26")
+        print(f"[Android] mipmap {len(ANDROID_DENSITIES)} 档 × 4"
+              f"（传统 squircle/round + 自适应前景/monochrome，均 {SUPERSAMPLE}× 超采样）"
+              " + mipmap-anydpi-v26/{ic_launcher,ic_launcher_round}.xml")
 
     print("完成。")
     return 0

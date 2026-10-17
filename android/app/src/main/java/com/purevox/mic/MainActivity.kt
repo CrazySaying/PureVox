@@ -20,17 +20,27 @@
 package com.purevox.mic
 
 import android.Manifest
+import android.annotation.SuppressLint
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
+import android.provider.Settings
 import android.text.Editable
 import android.text.TextWatcher
 import android.util.Log
 import android.view.KeyEvent
+import android.view.View
 import android.widget.Button
 import android.widget.EditText
+import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -43,6 +53,10 @@ import com.purevox.mic.net.Discovery
 import com.purevox.mic.net.HealthProbe
 import com.purevox.mic.net.WsClient
 import com.purevox.mic.service.CaptureService
+import com.purevox.mic.update.UpdateChecker
+import com.purevox.mic.update.UpdateDownloader
+import com.purevox.mic.update.UpdateInstaller
+import java.io.File
 
 /**
  * 唯一的界面与编排者（单 Activity，Material 风格）。
@@ -53,11 +67,18 @@ import com.purevox.mic.service.CaptureService
  * 3. 远程输入：IME 已组合文本（`text`）+ 手机实体键（`key`）。电脑端**默认关闭**，
  *    没开开关时电脑会回 `err`，本界面把 `err` 原文显示出来，不静默丢弃。
  *
+ * 界面按卡片分组（连接 / 功能 / 远程输入 / 后台保活 / 更新），底部「诊断」默认收起
+ * （标题行点击展开）—— 迁移期调试信息仍在，只是不再一上来就占满整屏。
+ *
  * 纪律：
  * - **收到 `ready` 之前不推流、不播放**（[applyState] 里 `ready` 是必要条件）。
  * - 状态区是固定行数的读数（连接状态 / RTT / 收发包数 / 播放水位 / Opus 探测），
  *   2 Hz 刷新；失败项显示「不可用 + 原因」，绝不显示伪造的 0。
  * - 所有 OkHttp 回调都切回主线程再动 UI。
+ *
+ * 会话保活：只要「已连接」或「正在推流」就由 [CaptureService] 常驻一条前台通知
+ * （[syncSessionService]），通知里的「停止 / 断开」按钮经广播回到这里处理
+ * （[notifReceiver]）—— 服务不认识协议，编排只此一处。
  */
 class MainActivity : AppCompatActivity() {
 
@@ -127,6 +148,16 @@ class MainActivity : AppCompatActivity() {
     private var suppressTextSync = false
     private var applyingState = false
 
+    /** 前台会话服务当前是否在跑 / 是否含麦克风类型（避免每次对账都重发通知）。 */
+    private var svcRunning = false
+    private var svcMic = false
+
+    // 应用内更新状态（手动检查、手动下载、手动安装）
+    private var updateRelease: UpdateChecker.ReleaseInfo? = null
+    private var updateApk: File? = null
+    private var updateBusy = false
+    private var updateMsg = ""
+
     /** 局域网自动发现。发现到就自动填地址并连上；找不到才让用户手动填。 */
     private var discovery: Discovery? = null
     /** 已通过 mDNS 发现到电脑（此时地址框只是「看一眼」，不是主路径）。 */
@@ -148,8 +179,40 @@ class MainActivity : AppCompatActivity() {
     private lateinit var swRemote: SwitchCompat
     private lateinit var swRemoteText: SwitchCompat
     private lateinit var swRemoteKeys: SwitchCompat
-    private lateinit var etText: EditText
+    private lateinit var etText: PvEditText
+    private lateinit var btnSend: Button
+    private lateinit var btnClear: Button
+    private lateinit var tvBattery: TextView
+    private lateinit var btnBattery: Button
+    private lateinit var tvUpdate: TextView
+    private lateinit var btnCheckUpdate: Button
+    private lateinit var btnDownload: Button
+    private lateinit var btnInstall: Button
+    private lateinit var tvDiagHeader: TextView
+    private lateinit var llDiag: LinearLayout
     private lateinit var tvLog: TextView
+
+    /**
+     * 通知栏按钮的接收端（前台服务发的是**广播**，不是服务调用）。注册在整个 Activity
+     * 生命周期（`onCreate`→`onDestroy`），**不是** `onStart`→`onStop` —— 否则用户退到后台
+     * 时按钮就失效了，而那恰恰是最需要它们的时刻。
+     */
+    private val notifReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                CaptureService.BROADCAST_NOTIF_STOP -> {
+                    log("通知栏：停止推流")
+                    swMic.isChecked = false
+                    applyState()
+                    updateStatus()
+                }
+                CaptureService.BROADCAST_NOTIF_DISCONNECT -> {
+                    log("通知栏：断开连接")
+                    disconnect()
+                }
+            }
+        }
+    }
 
     private val ticker = object : Runnable {
         override fun run() {
@@ -230,27 +293,64 @@ class MainActivity : AppCompatActivity() {
             override fun afterTextChanged(s: Editable?) {
                 if (suppressTextSync) return
                 val typed = s?.toString().orEmpty()
-                if (typed.isEmpty()) return
-                if (!remoteTextOn || !ready) return
-                // 同步给电脑后清空：既让电脑拿到「已组合好」的文本，又不与本地输入打架
-                suppressTextSync = true
-                try {
-                    sendText(typed)
-                } finally {
-                    etText.setText("")
-                    suppressTextSync = false
+                if (typed.isNotEmpty() && remoteTextOn && ready) {
+                    // 同步给电脑后清空：既让电脑拿到「已组合好」的文本，又不与本地输入打架
+                    suppressTextSync = true
+                    try {
+                        sendText(typed)
+                    } finally {
+                        etText.setText("")
+                        suppressTextSync = false
+                    }
                 }
+                updateButtons()
             }
         })
 
+        // 长文本发送 / 清空；空框里按退格 → 把删除键转发给电脑（见 PvEditText）
+        etText.onDeleteWhenEmpty = { forwardBackspace() }
+        btnSend.setOnClickListener { sendComposed() }
+        btnClear.setOnClickListener { clearComposed() }
+
+        // 诊断区默认收起，标题行点击展开/收起
+        tvDiagHeader.setOnClickListener { toggleDiag() }
+
+        // 后台保活：电池优化白名单
+        btnBattery.setOnClickListener { requestIgnoreBattery() }
+
+        // 应用内更新：手动检查 → 下载 → 安装（不自动检查，见 UpdateChecker）
+        btnCheckUpdate.setOnClickListener { checkUpdate() }
+        btnDownload.setOnClickListener { downloadUpdate() }
+        btnInstall.setOnClickListener { installUpdate() }
+
+        // 通知栏按钮（前台服务发广播回来）
+        ContextCompat.registerReceiver(
+            this,
+            notifReceiver,
+            IntentFilter().apply {
+                addAction(CaptureService.BROADCAST_NOTIF_STOP)
+                addAction(CaptureService.BROADCAST_NOTIF_DISCONNECT)
+            },
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
+
         requestPermissions()
         refreshRemoteSwitches()
+        refreshBattery()
+        renderUpdate()
+        updateButtons()
         log("PureVox 客户端就绪 · $opusDetail")
     }
 
     override fun onStart() {
         super.onStart()
         ui.post(ticker)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // 从系统设置切回来时刷新电池优化状态
+        refreshBattery()
     }
 
     override fun onStop() {
@@ -269,6 +369,11 @@ class MainActivity : AppCompatActivity() {
         // `IllegalArgumentException`
         discovery?.stop()
         discovery = null
+        try {
+            unregisterReceiver(notifReceiver)
+        } catch (e: IllegalArgumentException) {
+            Log.w(TAG, "接收器已注销", e)
+        }
         teardown()
         super.onDestroy()
     }
@@ -574,9 +679,7 @@ class MainActivity : AppCompatActivity() {
         } else if (!wantMic && uplink != null) {
             uplink?.stop()
             uplink = null
-            CaptureService.stop(this)
             log("麦克风上行已停止")
-            updateButtons()
         }
 
         speakerOn = swSpeaker.isChecked && ready
@@ -600,12 +703,37 @@ class MainActivity : AppCompatActivity() {
 
         remoteTextOn = swRemote.isChecked && swRemoteText.isChecked && ready
         remoteKeysOn = swRemote.isChecked && swRemoteKeys.isChecked && ready
+        syncSessionService()
         updateButtons()
+    }
+
+    /**
+     * 会话前台服务对账：**已连接**或**正在推流**就常驻通知（保活），两者都没有就撤掉。
+     * 只在「该不该跑 / 含不含麦克风」变化时下发，避免每次对账都重发通知。
+     */
+    private fun syncSessionService() {
+        val mic = uplink != null
+        val keep = ready || mic
+        if (!keep) {
+            if (svcRunning) {
+                CaptureService.stop(this)
+                svcRunning = false
+                svcMic = false
+            }
+            return
+        }
+        if (svcRunning && svcMic == mic) return
+        svcRunning = true
+        svcMic = mic
+        val text = if (mic) getString(R.string.notif_default) else getString(R.string.notif_connected)
+        CaptureService.update(this, text, mic)
     }
 
     /** 起上行：先起前台服务（Android 9+ 后台麦克风的前提），再开 AudioRecord。 */
     private fun startUplink(): Boolean {
-        CaptureService.start(this, getString(R.string.notif_starting))
+        CaptureService.start(this, getString(R.string.notif_starting), mic = true)
+        svcRunning = true
+        svcMic = true
         val u = MicUplink(
             context = this,
             onPacket = { pkt -> ws?.sendAudio(pkt, pkt.size) },
@@ -613,6 +741,8 @@ class MainActivity : AppCompatActivity() {
         )
         if (!u.start()) {
             CaptureService.stop(this)
+            svcRunning = false
+            svcMic = false
             return false
         }
         uplink = u
@@ -629,6 +759,8 @@ class MainActivity : AppCompatActivity() {
         downlink?.stop()
         downlink = null
         CaptureService.stop(this)
+        svcRunning = false
+        svcMic = false
         ws?.disconnect()
         ws = null
         ready = false
@@ -660,6 +792,45 @@ class MainActivity : AppCompatActivity() {
     private fun sendText(s: String) {
         if (!remoteTextOn || !ready) return
         ws?.sendText(Proto.text(s))
+    }
+
+    /**
+     * 长文本「发送」：把输入框里已组合的整段文本一次性交给电脑，然后清空本框。
+     * 与「打字同步」的逐次转发共用同一个 `text` 消息（一条实现路径），只是时机不同：
+     * 打字同步是每敲一下就发，这里是攒够了一整段再发。
+     */
+    private fun sendComposed() {
+        val s = etText.text?.toString().orEmpty()
+        if (s.isEmpty() || !remoteTextOn || !ready || ws == null) {
+            showErr(getString(R.string.msg_send_blocked))
+            return
+        }
+        ws?.sendText(Proto.text(s))
+        log(getString(R.string.msg_sent, s.length))
+        clearComposed()
+    }
+
+    /** 只清本机输入框（不动电脑）。走 [suppressTextSync] 避免触发自动同步。 */
+    private fun clearComposed() {
+        suppressTextSync = true
+        try {
+            etText.setText("")
+        } finally {
+            suppressTextSync = false
+        }
+        updateButtons()
+    }
+
+    /**
+     * 输入框为空时按删除键 → 把 Android 删除键（`KEYCODE_DEL`）发给电脑
+     * （电脑端 `keymap.rs` 映射成 PC Backspace）。返回「是否已转发」；没开远程输入时
+     * 返回 `false`，交回默认行为（什么也不发生）。down+up 成对发，等同一次真实按键。
+     */
+    private fun forwardBackspace(): Boolean {
+        if (!remoteTextOn || !ready || ws == null) return false
+        sendKey(KeyEvent.KEYCODE_DEL, true)
+        sendKey(KeyEvent.KEYCODE_DEL, false)
+        return true
     }
 
     private fun refreshRemoteSwitches() {
@@ -703,6 +874,12 @@ class MainActivity : AppCompatActivity() {
         } else {
             getString(R.string.hint_text_local)
         }
+        val hasText = !etText.text.isNullOrEmpty()
+        btnSend.isEnabled = hasText && remoteTextOn
+        btnClear.isEnabled = hasText
+        btnCheckUpdate.isEnabled = !updateBusy
+        btnDownload.isEnabled = !updateBusy && updateRelease != null && updateApk == null
+        btnInstall.isEnabled = !updateBusy && updateApk != null
     }
 
     /** 固定 7 行读数；行数固定，数值变长也不跳布局。 */
@@ -792,6 +969,151 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // ---------------------------------------------------------------- 诊断区 / 保活 / 更新
+
+    /** 诊断区展开/收起（默认收起，见 activity_main.xml）。 */
+    private fun toggleDiag() {
+        val show = llDiag.visibility != View.VISIBLE
+        llDiag.visibility = if (show) View.VISIBLE else View.GONE
+        tvDiagHeader.setText(if (show) R.string.diag_hide else R.string.diag_show)
+    }
+
+    private fun isIgnoringBattery(): Boolean {
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        return pm.isIgnoringBatteryOptimizations(packageName)
+    }
+
+    private fun refreshBattery() {
+        tvBattery.setText(
+            if (isIgnoringBattery()) R.string.battery_ignored else R.string.battery_not_ignored,
+        )
+    }
+
+    /**
+     * 请求「忽略电池优化」。用系统弹窗（`ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`）
+     * 而不是自己写白名单页 —— 是否放行由系统决定，我们只是发起请求。
+     * 需要 `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` 权限（manifest 已声明）。
+     */
+    @SuppressLint("BatteryLife")
+    private fun requestIgnoreBattery() {
+        if (isIgnoringBattery()) {
+            refreshBattery()
+            return
+        }
+        val req = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+            .setData(Uri.parse("package:$packageName"))
+        try {
+            startActivity(req)
+        } catch (e: Exception) {
+            // 个别 ROM 没有该弹窗 → 退到电池优化列表，用户仍能手动加白
+            try {
+                startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+            } catch (e2: Exception) {
+                showErr("无法打开电池优化设置：${e2.message ?: e2.javaClass.simpleName}")
+            }
+        }
+    }
+
+    /** 本机版本 + 更新状态两行（第一行恒在，第二行随检查 / 下载推进）。 */
+    private fun renderUpdate() {
+        val base = getString(
+            R.string.update_installed,
+            UpdateChecker.installedName(this),
+            UpdateChecker.installedCode(this).toString(),
+        )
+        tvUpdate.text = if (updateMsg.isEmpty()) base else "$base\n$updateMsg"
+    }
+
+    private fun checkUpdate() {
+        if (updateBusy) return
+        updateBusy = true
+        updateMsg = getString(R.string.update_checking)
+        renderUpdate()
+        updateButtons()
+        UpdateChecker.check(this) { res ->
+            ui.post {
+                updateBusy = false
+                when (res) {
+                    is UpdateChecker.UpdateResult.DevBuild ->
+                        updateMsg = getString(R.string.update_dev_build)
+
+                    is UpdateChecker.UpdateResult.UpToDate ->
+                        updateMsg = getString(R.string.update_uptodate)
+
+                    is UpdateChecker.UpdateResult.Failed ->
+                        updateMsg = getString(R.string.update_failed, res.reason)
+
+                    is UpdateChecker.UpdateResult.Available -> {
+                        updateRelease = res.release
+                        updateApk = null
+                        var m = getString(R.string.update_available, res.release.displayVersion)
+                        val notes = res.release.notes.trim()
+                        if (notes.isNotEmpty()) m += "\n" + notes.take(400)
+                        updateMsg = m
+                    }
+                }
+                log("更新检查：$updateMsg")
+                renderUpdate()
+                updateButtons()
+            }
+        }
+    }
+
+    private fun downloadUpdate() {
+        val rel = updateRelease ?: return
+        if (updateBusy) return
+        updateBusy = true
+        updateMsg = getString(R.string.update_downloading, 0)
+        renderUpdate()
+        updateButtons()
+        UpdateDownloader.download(
+            this,
+            rel,
+            onProgress = { pct ->
+                ui.post {
+                    updateMsg = getString(R.string.update_downloading, pct)
+                    renderUpdate()
+                }
+            },
+            onDone = { file, err ->
+                ui.post {
+                    updateBusy = false
+                    if (file != null) {
+                        updateApk = file
+                        updateMsg = getString(R.string.update_downloaded)
+                    } else {
+                        updateMsg = getString(R.string.update_failed, err ?: "未知错误")
+                    }
+                    log("更新下载：${file?.name ?: err}")
+                    renderUpdate()
+                    updateButtons()
+                }
+            },
+        )
+    }
+
+    private fun installUpdate() {
+        val apk = updateApk ?: return
+        if (!apk.exists()) {
+            updateMsg = getString(R.string.update_failed, "安装包已不存在")
+            renderUpdate()
+            return
+        }
+        if (!UpdateInstaller.canInstall(this)) {
+            updateMsg = getString(R.string.update_install_denied)
+            renderUpdate()
+            UpdateInstaller.openInstallSettings(this)
+            return
+        }
+        try {
+            UpdateInstaller.install(this, apk)
+            updateMsg = getString(R.string.update_install_started)
+        } catch (e: Exception) {
+            updateMsg = getString(R.string.update_failed, e.message ?: e.javaClass.simpleName)
+        }
+        renderUpdate()
+    }
+
     // ---------------------------------------------------------------- 偏好 & 绑定
 
     private fun bindViews() {
@@ -809,6 +1131,16 @@ class MainActivity : AppCompatActivity() {
         swRemoteText = findViewById(R.id.swRemoteText)
         swRemoteKeys = findViewById(R.id.swRemoteKeys)
         etText = findViewById(R.id.etText)
+        btnSend = findViewById(R.id.btnSend)
+        btnClear = findViewById(R.id.btnClear)
+        tvBattery = findViewById(R.id.tvBattery)
+        btnBattery = findViewById(R.id.btnBattery)
+        tvUpdate = findViewById(R.id.tvUpdate)
+        btnCheckUpdate = findViewById(R.id.btnCheckUpdate)
+        btnDownload = findViewById(R.id.btnDownload)
+        btnInstall = findViewById(R.id.btnInstall)
+        tvDiagHeader = findViewById(R.id.tvDiagHeader)
+        llDiag = findViewById(R.id.llDiag)
         tvLog = findViewById(R.id.tvLog)
     }
 
