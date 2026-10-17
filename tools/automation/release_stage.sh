@@ -74,14 +74,13 @@ stage() { # <稳定名> <匹配通配…>；缺产物时记下来并返回 1
   return 1
 }
 stage "out/PureVox-${VERSION}-windows-x64-setup.exe" */*-setup.exe || true
-stage "out/PureVox-${VERSION}-windows-x64.msi"       */*.msi       || true
 stage "out/PureVox-${VERSION}-linux-x64.AppImage"    */*.AppImage  || true
 stage "out/PureVox-${VERSION}-linux-x64.deb"         */*.deb       || true
 stage "out/PureVox-${VERSION}-linux-x64.rpm"         */*.rpm       || true
 stage "out/PureVox-${VERSION}-android-arm64.apk"     */*.apk       || true
 
 # **缺任何一项都让 job 失败**（原来只 echo 一行警告就继续）。tag 已经推出去了，这时候发一个
-# 缺 MSI 的 release 比不发更糟：用户点进去才发现，事后又得删 tag 重来一遍
+# 缺安装包的 release 比不发更糟：用户点进去才发现，事后又得删 tag 重来一遍
 # （AGENTS §2.6：CI 失败的 tag 必须删，否则会截断下个 release 的提交记录）。
 if [ -n "$missing" ]; then
   echo "::error::缺少产物：$missing"
@@ -107,8 +106,8 @@ for f in $files; do
   fi
   n=$((n + 1))
 done
-if [ "$n" -ne 6 ]; then
-  echo "::error::附件数应为 6，实际 $n（files=$files）"
+if [ "$n" -ne 5 ]; then
+  echo "::error::附件数应为 5，实际 $n（files=$files）"
   exit 1
 fi
 

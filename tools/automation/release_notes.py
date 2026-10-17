@@ -41,19 +41,19 @@ _utf8.force()
 
 ROOT = Path(__file__).resolve().parents[2]
 
-# 产物清单**逐字**跟着 release.yml 的 `stage` 重命名规则走 —— 用户是照着这段去找
+# 产物清单**逐字**跟着 release_stage.sh 的 `stage` 重命名规则走 —— 用户是照着这段去找
 # 安装包的，写错就是「点进 release 找不到我说的那个文件」。改那边改这里。
 # 命名规则见 update/mod.rs 的 `ci_asset_names_match_the_tag_version` 测试（它直接读
-# release.yml，改了会红）。
+# release_stage.sh，改了会红）。
 PRODUCT_LINES = (
     "- **Windows x64**：`PureVox-<版本>-windows-x64-setup.exe`"
-    "（NSIS，静默参数 `/S`，自动更新走它）、`PureVox-<版本>-windows-x64.msi`（MSI）",
+    "（NSIS 安装包，静默参数 `/S`，**自动更新走它**）",
     "- **Linux x64**：`PureVox-<版本>-linux-x64.AppImage`（**只有它能自动更新**）、"
     "`PureVox-<版本>-linux-x64.deb`、`PureVox-<版本>-linux-x64.rpm`"
     "（系统缺 `libopus0` 时网络音频降级，其余功能正常）",
     "- **Android arm64**：`PureVox-<版本>-android-arm64.apk`"
     "（手机 ⇄ 电脑客户端，**正式签名**的 release 包 —— 可直接安装、可覆盖升级；"
-    "不是 debug 包）",
+    "不是 debug 包。App 内可检查并安装更新）",
     "",
     "> 三个平台**独立命名**，自动更新按**文件名后缀**认领本平台产物（不看版本号）。",
 )

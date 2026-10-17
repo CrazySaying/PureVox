@@ -20,14 +20,15 @@
 产出（全部写到 stdout，CI 重定向进 $GITHUB_ENV / 本机 eval）：
 
   TAG     = v2026.10.08.1430   完整时间戳，唯一且按时间全序（**比较更新的依据**）
-  VERSION = 26.10.8            应用/包版本 = 年.月.日（semver 三段，Tauri/MSI 硬要求）
+  VERSION = 26.10.8            应用/包版本 = 年.月.日（semver 三段，Tauri 硬要求）
   STAMP   = 2026-10-08-1430    完整时间戳的文件名形式（产物重命名用，含时分故唯一）
   ACODE   = 2610081430         Android versionCode = yyMMddHHmm（单调递增，int32 内）
   PUREVOX_BUILD_VERSION / PUREVOX_BUILD_STAMP → 编译进程序（见 src/version.rs）
 
-为什么 VERSION 只有三段：Tauri 要 semver 三段、MSI ProductVersion 限 major≤255 /
-minor≤255 / build≤65535，`2026.10.08` 直译会报 major > 255。故 major=年-2000、
-minor=月、build=日（≤31，远低于上限）。**同日多次发布靠 TAG 的时分区分**，更新检查
+为什么 VERSION 只有三段：Tauri 要 semver 三段；历史上还要出 MSI，MSI ProductVersion 限
+major≤255 / minor≤255 / build≤65535，`2026.10.08` 直译会报 major > 255。故 major=年-2000、
+minor=月、build=日（≤31，远低于上限）。**现在 Windows 只发 NSIS（exe）**，但映射保持不变
+（显示版本 / 产物名 / 更新说明都按它走）。**同日多次发布靠 TAG 的时分区分**，更新检查
 比较 TAG（见 src/update/），因此显示版本重复不影响更新判定。
 
 同时生成 Tauri 版本覆盖配置 `src-tauri/.build-version.json`（不提交，见该目录

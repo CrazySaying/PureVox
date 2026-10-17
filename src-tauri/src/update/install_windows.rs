@@ -19,14 +19,19 @@
 //! `installer.nsi`：`/S` 静默、`/UPDATE` 跳过重装页与快捷方式、`/NS` 不建快捷方式、
 //! `/R` 装完重启应用）。
 //!
+//! **Windows 只发 NSIS 一个安装包**（`-setup.exe`），故这里没有第二个分支：
+//! `src-tauri/tauri.windows.conf.json` 把 `bundle.targets` 收成 `["nsis"]`，
+//! 不再产出 MSI（一个平台一条安装路径，见 AGENTS §2.1）。少一种产物 = 少一种
+//! 「更新时挑错包」的可能，也不用再维护 msiexec 分支。
+//!
 //! **先退进程再装**：NSIS 安装器开头有 `CheckIfAppIsRunning`，正在运行的
 //! `purevox.exe` 会被它拦下弹框。这里用一个**脱离的 cmd**先歇几秒等本进程退出，
 //! 再拉安装器；随后调用方 `app.exit(0)`，安装器接着覆盖文件并按 `/R` 重启。
 
 use super::{Phase, Status};
 
-/// 本平台在 release 产物里认的后缀（NSIS 安装包优先，MSI 兜底）。
-pub const ASSET_SUFFIXES: &[&str] = &["-setup.exe", ".msi"];
+/// 本平台在 release 产物里认的后缀：**只有 NSIS**（`tauri.windows.conf.json` 只出它）。
+pub const ASSET_SUFFIXES: &[&str] = &["-setup.exe"];
 
 /// 拉起安装器并返回一句给界面看的话；调用方随后应退出进程。
 pub fn install(st: &Status) -> Result<String, String> {
@@ -37,23 +42,10 @@ pub fn install(st: &Status) -> Result<String, String> {
   if !exe.is_file() {
     return Err(format!("安装包不见了：{}", st.saved_path));
   }
-  // 只有 NSIS 安装包支持上面的命令行开关；MSI 走 msiexec 静默安装。
-  let is_nsis = exe
-    .file_name()
-    .and_then(|n| n.to_str())
-    .map(|n| n.to_ascii_lowercase().ends_with("-setup.exe"))
-    .unwrap_or(false);
-  let cmdline = if is_nsis {
-    format!(
-      "ping -n 5 127.0.0.1 >nul & \"{}\" /S /UPDATE /NS /R",
-      exe.display()
-    )
-  } else {
-    format!(
-      "ping -n 5 127.0.0.1 >nul & start /wait msiexec /i \"{}\" /qb /norestart",
-      exe.display()
-    )
-  };
+  let cmdline = format!(
+    "ping -n 5 127.0.0.1 >nul & \"{}\" /S /UPDATE /NS /R",
+    exe.display()
+  );
   use std::os::windows::process::CommandExt;
   const DETACHED_PROCESS: u32 = 0x0000_0008;
   const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -63,9 +55,5 @@ pub fn install(st: &Status) -> Result<String, String> {
     .spawn()
     .map_err(|e| format!("拉起安装器失败：{e}"))?;
   super::with(|s| s.phase = Phase::Installing);
-  Ok(if is_nsis {
-    "安装器已启动，正在退出并更新…".into()
-  } else {
-    "MSI 安装已启动，正在退出并更新…".into()
-  })
+  Ok("安装器已启动，正在退出并更新…".into())
 }

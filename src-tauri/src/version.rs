@@ -19,9 +19,11 @@
 //!
 //! 打包/发版时由 `tools/automation/version.py`（跨平台唯一实现）从 tag
 //! （`v<yyyy.MM.dd.HHmm>`）或当前 UTC 时间推导，产出两个编译期常量：
-//! - [`VERSION`] = `yy.M.d`（如 `26.10.8`）：**显示用**，也是 Tauri/MSI 的包版本。
-//!   必须三段：Tauri 要 semver，MSI ProductVersion 限 major≤255 / minor≤255 /
-//!   build≤65535，`2026.10.8` 直译会报 major > 255。
+//! - [`VERSION`] = `yy.M.d`（如 `26.10.8`）：**显示用**，也是 Tauri 打包的包版本。
+//!   必须三段（Tauri 要 semver）。之所以不是 `2026.10.8`：历史上还要出 MSI，而
+//!   MSI ProductVersion 限 major≤255 / minor≤255 / build≤65535，`2026.10.8` 直译会报
+//!   major > 255；**现在 Windows 只发 NSIS（exe）**，但这个 `yy.M.d` 映射保持不变 ——
+//!   产品的显示版本、产物文件名、更新说明都按它走，改格式只会平白漂移。
 //! - [`STAMP`] = `yyyy.MM.dd.HHmm`（如 `2026.10.08.1430`）：**比较更新用**，按时间全序。
 //!   显示版本同日重复时（同一天发两次），靠 STAMP 的时分区分新旧——更新检查比较它，
 //!   不比较 VERSION。

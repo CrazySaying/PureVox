@@ -505,7 +505,7 @@ mod tests {
   #[test]
   fn pick_asset_prefers_this_platform_then_falls_back() {
     // 产物名按**本平台的**后缀构造，不能硬编码 Windows 产物名：ASSET_SUFFIXES 来自
-    // install_*.rs，是平台相关的（Windows 是 msi/setup.exe，Linux 是 AppImage/deb/rpm）。
+    // install_*.rs，是平台相关的（Windows 是 setup.exe，Linux 是 AppImage/deb/rpm）。
     // 写死 Windows 名字的话，Linux 上 pick_asset 一个都匹配不上直接 panic——
     // 而 Windows 上永远绿。这类错只有真在 Linux 上跑一遍门禁才会暴露。
     let suffixes: &[&str] = imp::ASSET_SUFFIXES;
@@ -623,7 +623,7 @@ mod tests {
     // 断言两件最容易错的事：
     // ① 版本段来自 `${VERSION}` 而不是空串 —— release job 曾经从没跑过 version.py，
     //    产物名全叫 `PureVox--windows-x64-setup.exe`（双连字符）；
-    // ② 每个平台段的**后缀**正好是本平台认领的后缀，且六个平台互不重叠。
+    // ② 每个平台段的**后缀**正好是本平台认领的后缀，且五个平台互不重叠。
     let tpls: Vec<&str> = RELEASE_STAGE_SH
       .lines()
       .filter(|l| l.contains("stage \"out/PureVox-"))
@@ -637,7 +637,7 @@ mod tests {
       })
       .collect();
     assert!(
-      tpls.len() >= 6,
+      tpls.len() >= 5,
       "release_stage.sh 里的产物模板只剩 {} 个，命名规则变了要重新审这一段",
       tpls.len()
     );
@@ -665,7 +665,7 @@ mod tests {
       suffixes.push(suffix.to_string());
     }
 
-    // 六个平台段的后缀互不为彼此的后缀（`pick_asset` 只认后缀，重叠就会挑错）
+    // 五个平台段的后缀互不为彼此的后缀（`pick_asset` 只认后缀，重叠就会挑错）
     for a in &suffixes {
       for b in &suffixes {
         if a != b {
@@ -715,7 +715,7 @@ mod tests {
       .chain(suffixes_of(windows_rs, "windows"))
       .collect();
     assert!(
-      known.len() >= 5,
+      known.len() >= 4,
       "只认出 {} 个后缀，两个平台的定义都被改了？",
       known.len()
     );
@@ -736,7 +736,7 @@ mod tests {
       })
       .map(|n| n.to_ascii_lowercase())
       .collect();
-    assert!(staged.len() >= 6, "只抠出 {} 个 stage 模板", staged.len());
+    assert!(staged.len() >= 5, "只抠出 {} 个 stage 模板", staged.len());
 
     for name in &staged {
       // **Android 的 apk 是例外**：它由安卓客户端自己认领（本模块是桌面端更新逻辑，

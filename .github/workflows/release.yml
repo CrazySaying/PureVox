@@ -1,5 +1,5 @@
-# PureVox 打包 / 发版 —— **多平台**：Windows（MSI+NSIS）、Linux（deb+rpm+AppImage）、
-# Android（debug APK）。触发：推 tag `v*`（构建 + 建 release）或手动 `workflow_dispatch`
+# PureVox 打包 / 发版 —— **多平台**：Windows（NSIS 安装包）、Linux（deb+rpm+AppImage）、
+# Android（签名 release APK）。触发：推 tag `v*`（构建 + 建 release）或手动 `workflow_dispatch`
 # （只构建、不建 release）。**分支推送不触发**；代码门禁见 tests.yml（手动）。
 # 纪律：缓存 restore-only（唯一写入者 warm-cache.yml）；版本/键唯一来源
 # tools/automation/versions.env；门禁实现唯一 = tools/automation/check.py。
@@ -23,7 +23,7 @@ env:
 jobs:
   # ---------------------------------------------------------------- Windows
   windows:
-    name: 打包 · Windows（MSI + NSIS）
+    name: 打包 · Windows（NSIS 安装包）
     runs-on: windows-latest
     defaults:
       run:
@@ -152,13 +152,8 @@ jobs:
       # **一个格式一个 artifact**。artifact 下载永远是 zip（GitHub 的机制，改不了），
       # 所以只能拆粒度：合成一个包的话「只想要 deb」也得下完 274 MB 再解开。
       # 每个都 `if-no-files-found: error`：少出一样就当场红，不产出残缺的包。
-      - name: Upload MSI
-        uses: actions/upload-artifact@v7
-        with:
-          name: PureVox-Windows-x64-${{ env.VERSION }}-msi
-          path: src-tauri/target/release/bundle/msi/*.msi
-          if-no-files-found: error
-
+      # **Windows 只有 NSIS 一个安装包**（`tauri.windows.conf.json` 把 targets 收成 ["nsis"]）：
+      # 只留一条安装/更新路径，不再出 MSI。
       - name: Upload NSIS installer
         uses: actions/upload-artifact@v7
         with:

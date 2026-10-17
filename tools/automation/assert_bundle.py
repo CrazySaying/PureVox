@@ -80,7 +80,7 @@ def newest(dir_path: Path, pattern: str) -> Path | None:
     """取最新的一个产物。
 
     **必须挑最新的，不能按名字排序取第一个**：`target/release/bundle/` 会**累积**历次
-    构建的产物（开发机上常有 4 个 setup.exe、3 个 msi，全是不同日期的）。按名字排序取
+    构建的产物（开发机上常有 4 个 setup.exe，全是不同日期的）。按名字排序取
     第一个会拿到几个月前那个旧的，断言它的体积/布局 —— 测的其实是上次的包。
     """
     if not dir_path.is_dir():
@@ -125,13 +125,12 @@ def debug_ready() -> bool:
 def find_artifacts(bundle: Path) -> list[Path]:
     """列出必须做体积下限检查的主产物（`check_size` 用）。"""
     if IS_WIN:
-        # NSIS 的 .exe 与 MSI 的 .msi，两种都要在
+        # **Windows 只有 NSIS 安装包一个产物**（`tauri.windows.conf.json` 把 targets
+        # 收成 ["nsis"]，不再出 MSI）。这里少一种就当场红，避免打出残缺的发布。
         exe = newest(bundle / "nsis", "*.exe")
-        msi = newest(bundle / "msi", "*.msi")
-        for p, pat in ((exe, "nsis/*.exe"), (msi, "msi/*.msi")):
-            if p is None:
-                raise SystemExit(f"找不到 {pat} 产物（{bundle}）")
-        return [exe, msi]  # type: ignore[list-item]
+        if exe is None:
+            raise SystemExit(f"找不到 nsis/*.exe 产物（{bundle}）")
+        return [exe]
     # Linux：deb 是主产物（要解包断言布局）
     deb = newest(bundle / "deb", "*.deb")
     if deb is None:
@@ -170,7 +169,7 @@ def install(bundle: Path, tmp: Path) -> tuple[Path, Path, list[str]]:
 def check_extra_artifacts(bundle: Path) -> None:
     """主产物之外必须存在的那些。"""
     if IS_WIN:
-        return  # Windows 只有 MSI / NSIS 两种，已在 find_artifacts 里查过
+        return  # Windows 只有 NSIS 一个安装包，已在 find_artifacts 里查过
 
     if newest(bundle / "rpm", "*.rpm") is None:
         raise SystemExit(f"缺少 rpm 产物（{bundle / 'rpm'}/*.rpm）")

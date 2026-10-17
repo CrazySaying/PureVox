@@ -43,9 +43,9 @@ r"""用假产物树 + 假 `gh` 在本地跑一遍 `release_stage.sh`，两个场
 
 | mode      | 输入                     | 期望                        |
 | --------- | ------------------------ | --------------------------- |
-| `ok`      | 六种产物齐全             | 退出 0，`gh` 收到六个路径   |
+| `ok`      | 五种产物齐全             | 退出 0，`gh` 收到五个路径   |
 | `missing` | 少一个 deb               | 退出 1，报「缺少产物」      |
-| `notes`   | 六种齐全但没有 notes 文件 | 退出 1，指名道姓            |
+| `notes`   | 五种齐全但没有 notes 文件 | 退出 1，指名道姓            |
 
 用法：`python tools/automation/run_release_stage.py`（不带参数跑全部）
 """
@@ -74,7 +74,6 @@ TAG = "v2026.10.15.0439"
 # 每个 artifact 目录里放什么 —— 文件名要与 release_stage.sh 的 `stage` 通配一一对应。
 # 目录名刻意带上版本/时间戳，与 CI 里 upload-artifact 的实际命名保持一致。
 LAYOUT = {
-    f"PureVox-Windows-x64-{VERSION}-msi": ["purevox_26.10.15_x64_en-US.msi"],
     f"PureVox-Windows-x64-{VERSION}-nsis": [f"PureVox_{VERSION}_x64-setup.exe"],
     f"PureVox-Linux-x64-{VERSION}-deb": [f"purevox_{VERSION}_amd64.deb"],
     f"PureVox-Linux-x64-{VERSION}-rpm": [f"purevox-{VERSION}-1.x86_64.rpm"],
@@ -176,7 +175,7 @@ def run_case(label: str, expect_rc: int, expect_gh: bool = False, **kw) -> bool:
 def main() -> int:
     print("== run_release_stage：用假产物树 + 假 gh 跑 release_stage.sh ==")
     results = [
-        run_case("六种产物齐全（必须走到 gh，且用的是假 gh）", 0, expect_gh=True),
+        run_case("五种产物齐全（必须走到 gh，且用的是假 gh）", 0, expect_gh=True),
         run_case("缺 deb", 1, drop=f"PureVox-Linux-x64-{VERSION}-deb"),
         run_case("没有 notes 文件", 1, notes=False),
     ]
