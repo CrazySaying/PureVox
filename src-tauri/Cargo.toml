@@ -25,12 +25,12 @@ edition = "2024"
 rust-version = "1.95"
 
 [build-dependencies]
-tauri-build = { version = "3.0.0-alpha.3", features = [] }
+tauri-build = { version = "3.0.0-alpha.4", features = [] }
 
 [dependencies]
-tauri = { version = "3.0.0-alpha.4", features = ["tray-icon", "image-png"] }
+tauri = { version = "3.0.0-alpha.5", features = ["tray-icon", "image-png"] }
 # devtools：WebView2 开发者工具（JS 交互式调试；迁移期 release 也保留，见 AGENTS.md §1）
-tauri-runtime-wry = { version = "3.0.0-alpha.4", features = ["devtools"] }
+tauri-runtime-wry = { version = "3.0.0-alpha.5", features = ["devtools"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # 调试接口：系统 CPU / 内存
