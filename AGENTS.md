@@ -118,12 +118,29 @@ release 构建同样保留（不允许用编译开关剔除）。
   界面也不再提供「未选择」。**远端是否接受裸输出设备 ID 按平台**（`devices::loopback_accepts_device_id`）：
   Windows = WASAPI 端点可以（`loopback:<端点>` 或裸端点 ID），Linux = **只认 `loopback` / `loopback:<Pulse sink>`**
   （填 ALSA 设备 ID 会拼出 `<id>.monitor` 这种无效 monitor，far 永远取不到）。
-- **网络（手机 ⇄ 电脑）**（`src-tauri/src/net/`，协议见 DESIGN.md §4.1）：一个 axum WebSocket
-  服务，端口 **59123**，路径 `/ws`（另有 `/health` 自检）。三条能力共用一条连接：
+- **网络（手机 ⇄ 电脑）**（`src-tauri/src/net/`，协议 / 卡片 / TLS 见 DESIGN.md §4.1、§4.1.1、
+  §4.1.2）：一个 axum 服务绑 `0.0.0.0`，默认端口 **59123**（界面可改，持久化到
+  `~/.purevox/settings.json`），路径 `/ws`（另有 `/health` 自检、`/ca-cert` 下载 CA、
+  `/libopus-wasm.js` 给网页版、`/` 是网页版客户端）。三条能力共用一条连接：
   `remote_mic` 输入行（手机麦克风→电脑，**不需要虚拟声卡驱动**，直接进引擎可降噪）、
   `remote_speaker` 输出行（电脑→手机扬声器，按位置 tap）、远程输入（`text` 打字 + `key`
   全尺寸键盘，**两件事分开**，用 `net_set_remote_input` 开关且**默认关闭**）。
-  命令 `net_start` / `net_stop` / `net_status` / `net_set_remote_input`；状态进快照 `net` 段。
+  命令 `net_start` / `net_stop` / `net_restart` / `net_status` / `net_running` /
+  `net_set_remote_input` / `net_set_port` / `net_ifaces` / `net_select_ip` / `net_local_addr` /
+  `net_ca_pem`；状态进快照 `net` 段。
+  - **只监听 HTTPS，证书自签（CA + 叶两级）**（DESIGN.md §4.1.2）：网页版客户端的麦克风靠
+    `getUserMedia`，它**只在安全上下文里可用**，`http://<局域网IP>` 浏览器直接拒绝、**没有
+    任何绕过办法**。CA（10 年）与叶证书（397 天，SAN 覆盖 `localhost` + 当前全部可直连 IPv4，
+    换网络重签）存 `~/.purevox/ca/`；**必须两级**——Android 的「安装证书 → CA 证书」只接受
+    `basicConstraints: CA:TRUE`，一张自签叶证书装不进去。不想装证书就点一次「继续」
+    （Chrome 绕过证书错误后仍算安全上下文）。
+  - **mDNS 广播 `_purevox._tcp.local.`**（`net/mdns.rs`，随服务启停；TXT 只放 `v` 与 `proto`）：
+    客户端据此自动发现电脑，**服务没开就扫不到是预期行为**。**改网卡（子网）不重启服务、
+    改端口必须重启**：服务绑的是 `0.0.0.0`，换子网服务层面什么都没变、重启只会把已连着的
+    客户端全踢掉；`net::stop()` 要真的 `abort` 监听任务，否则改端口后重启必然 `address in use`。
+  - **编解码在客户端用 wasm**（`net/wasm/libopus-wasm.js`，MIT 预编译产物随包分发，**不新增
+    C 编译链**）：不用浏览器内置 WebCodecs——`AudioEncoder` 只有 Chrome 94+ 才有，实测就有
+    浏览器根本没有，于是在那儿麦克风与扬声器一起不可用。
   - **Opus 不引入 C 编译链（电脑端）**：`net/opus_sys.rs` 运行时动态加载——Windows 用
     `LoadLibraryExW` + `GetProcAddress` 加载预编译 x64 `opus.dll`（`src-tauri/opus.dll`，
     随包分发；`tauri.conf.json` 的 resources 已登记；查找 `<exe 同目录>/opus.dll` →
@@ -206,8 +223,14 @@ release 构建同样保留（不允许用编译开关剔除）。
 - **桌面声音输入（`loopback` 输入行）**：`device` = `loopback`（系统默认输出）或
   `loopback:<渲染端点ID｜sink 名>`（按平台，同 AEC 远端取值规则），复用 AEC 的回环采集
   （`audio/loopback.rs`）；行内增益 `volume_db`（-30~6 dB，默认 -6 dB，系统混音偏响）。
-- **手机面板（顶栏「手机」）**：网络服务开关、远程输入开关（**默认关**，风险提示常驻）、
-  本机地址与状态——从调试面板迁出为常驻功能面板（调试面板只留只读状态行）。
+- **手机 / 客户端的入口 = 网络行卡片（`ui/netrow.js`，DESIGN.md §4.1.1）**：顶栏**没有**独立的
+  「手机」面板——网络麦克风 / 网络扬声器那两类行就是全部的手机操作入口（没建网络行就先加行）。
+  卡片分三层职责，**不要混**：① **服务本身**（状态灯 + 状态串、`启动` / `停止` / `重启服务`）；
+  ② **面向客户端的地址**（网卡下拉 + 可编辑端口，二维码 / 复制 / 网址都跟着选中的地址走；
+  `net_ifaces` / `net_select_ip` / `net_set_port`）；③ **会话级开关**（远程输入**默认关**、
+  风险提示常驻、AEC 段只在 `remote_mic` 行存在：近端锁死为网络输入 + 近端增益 + 校准，
+  远端可选「系统默认输出」或「网络出站」）。另有「下载证书（手机装一次）」（`net_ca_pem`）。
+  调试面板只留 `net` 段的只读状态行。
   本机地址取局域网 IP（`net_local_addr`，UDP connect 技巧，不发包）；远程输入注入见上文
   `net/keys.rs`（Windows 已实现，其余平台明确不可用）。
 - **更新（顶栏「更新」，`src/update/`）**：**唯一数据源 = 本仓库 GitHub Releases**
