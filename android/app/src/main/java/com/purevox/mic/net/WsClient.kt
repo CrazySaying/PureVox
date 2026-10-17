@@ -35,7 +35,8 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * 与电脑端的 WebSocket 连接（明文 `ws://host:59123/ws`）。
+ * 与电脑端的 WebSocket 连接（`wss://host:59123/ws` —— 电脑端只监听 HTTPS，
+ * 自签证书的放行规则见 [LocalTls]）。
  *
  * 职责边界：
  * - 这里**只管连接与收发**：文本消息往上抛（[Listener.onMessage]）、二进制包往上抛

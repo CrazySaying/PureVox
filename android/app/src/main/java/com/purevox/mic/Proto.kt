@@ -27,7 +27,7 @@ import org.json.JSONObject
  * 这里只做「拼 JSON / 解 JSON」，不含任何状态 —— 状态都在 `net/WsClient.kt` 与
  * `MainActivity.kt`。字段只增不改，与电脑端保持一致。
  *
- * 传输：明文 `ws://`（AndroidManifest 已开 `usesCleartextTraffic`），
+ * 传输：**TLS**（`wss://` —— 电脑端只监听 HTTPS，自签证书的放行规则见 `net/LocalTls.kt`），
  * 二进制帧 = 一个 Opus 包（无头），文本帧 = 本文件的消息。
  */
 object Proto {

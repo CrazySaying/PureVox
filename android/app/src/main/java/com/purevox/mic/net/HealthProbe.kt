@@ -32,7 +32,7 @@ import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 /**
- * `GET /health` 自检（明文 `http://host:59123/health`）。
+ * `GET /health` 自检（`https://host:59123/health` —— 电脑端只监听 HTTPS）。
  *
  * 电脑端提供这个端点就是给人 / 手机看用的，**不需要**先建立 WebSocket
  * （见 `src-tauri/src/net/server.rs` 的 `health` 路由）。所以它独立于

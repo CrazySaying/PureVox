@@ -18,7 +18,7 @@
 // :app —— 唯一的模块。**没有** externalNativeBuild：Opus 用的是预编译入库的
 // `src/main/jniLibs/arm64-v8a/libpvopus.so`（libopus 1.5.2 + `cpp/pv_opus.cpp` 的 JNI
 // 转发层），所以 Gradle 构建**不需要 NDK / CMake**，CI 也不用装。重建那个 .so 用
-// `tools/automation/build_opus_android.ps1`。
+// `tools/automation/build_opus_android.py`。
 //
 // 为什么不用系统 MediaCodec：Android 上从来没有 `audio/opus` 这个 mime，系统 Opus codec
 // 注册的是 `audio/raw` / `audio/ogg;codecs=opus` / `audio/webm;codecs=opus`，后两者只认

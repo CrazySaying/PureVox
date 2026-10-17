@@ -23,7 +23,7 @@
     FOREGROUND_SERVICE_MICROPHONE      Android 14+ 的 microphone 前台服务类型
     FOREGROUND_SERVICE_DATA_SYNC       Android 14+：会话保活兼作 dataSync（连接期间常在）
     POST_NOTIFICATIONS                 Android 13+ 前台服务通知可见
-    INTERNET / ACCESS_NETWORK_STATE    ws:// 与 /health 自检
+    INTERNET / ACCESS_NETWORK_STATE    wss:// 与 https:// /health 自检（电脑端只监听 HTTPS）
     WAKE_LOCK                         推流期间不熄屏（音频线程）
     REQUEST_INSTALL_PACKAGES           应用内更新：把下载好的 APK 交给系统安装器
     REQUEST_IGNORE_BATTERY_OPTIMIZATIONS  应用内更新/推流：请求忽略电池优化（保活）

@@ -17,17 +17,25 @@
 手机 ⇄ 电脑的第二端：**手机麦克风当电脑麦克风**、**手机扬声器当电脑音箱**、
 **手机键盘当电脑全尺寸键盘**。三条能力共用电脑端的一个 WebSocket 连接。
 
+界面是**卡片式**（连接 / 功能 / 远程输入 / 后台保活 / 更新），底部「诊断」读数与日志
+**默认收起**、点标题行展开；客户端能**自动发现**电脑，也能**检查并安装自己的更新**。
+
 包名 `com.purevox.mic`，应用名 PureVox。
 
 ## 协议（与 `src-tauri/src/net/proto.rs` 一一对应）
 
 | 项 | 值 |
 | --- | --- |
-| 传输 | 明文 `ws://`，端口 **59123**，路径 **`/ws`** |
-| 自检 | `GET http://<host>:59123/health`（不需要连上 ws） |
+| 传输 | **TLS（`wss://`）**，默认端口 **59123**，路径 **`/ws`** |
+| 证书 | 电脑**自签**（CA + 叶证书两级，存 `~/.purevox/ca/`）；手机系统信任库里没有 → 见「传输与证书」 |
+| 发现 | 电脑端 mDNS 广播 **`_purevox._tcp.local.`**（随服务启停），客户端用系统 `NsdManager` 找 |
+| 自检 | `GET https://<host>:59123/health`（不需要连上 ws） |
 | 握手 | 客户端 → `{"t":"hello","proto":1}`；电脑回 `{"t":"ready",…}` |
-| 音频 | **二进制帧 = 一个 Opus 包（无头）**，48 kHz 单声道 |
+| 音频 | **二进制帧 = 一个 Opus 包（无头）**，48 kHz 单声道，帧长固定 **10 ms（480 样本）** |
 | 控制 | 文本帧 = JSON，判别字段 `t` |
+
+端口 `59123` 是**电脑端的默认值**（`proto::PORT`），可以在电脑端界面改并持久化到
+`~/.purevox/settings.json`；本客户端按默认端口连。
 
 客户端 → 电脑：`hello` / `sub` / `text` / `key` / `ping` / `rtt`。
 电脑 → 客户端：`ready` / `pong` / `err`（`err` 原文一律显示给用户，不静默）。
@@ -40,24 +48,118 @@
 ```
 app/src/main/java/com/purevox/mic/
 ├── Proto.kt                     协议常量与 JSON 拼装 / 解析（proto.rs 的镜像）
-├── MainActivity.kt              单界面：连接、三条能力编排、实体键拦截、IME 文本同步、状态读数
+├── MainActivity.kt              唯一界面：卡片编排、连接与三条能力的状态机、通知按钮广播、更新流程
+├── PvEditText.kt                输入框（包一层 InputConnectionWrapper）：空框里按删除键转发给电脑
 ├── net/
 │   ├── WsClient.kt              WebSocket 连接、hello/ping/rtt、二进制包收发、RTT 计算
-│   └── HealthProbe.kt           GET /health 自检（不依赖 ws 已连上）
+│   ├── HealthProbe.kt           GET /health 自检（不依赖 ws 已连上）
+│   ├── Discovery.kt             局域网自动发现（NsdManager 找 `_purevox._tcp`）
+│   └── LocalTls.kt              自签证书的放行范围（只对私有网段放宽，见下）
 ├── audio/
-│   ├── OpusSupport.kt           audio/opus 能力探测（编解码器名 + 输入 PCM 格式）
-│   ├── OpusEncoder.kt           上行编码（输出驱动，帧长不假设 10 ms）
+│   ├── OpusNative.kt            内置 libopus 1.5.2 的 JNI 绑定（加载 `libpvopus.so`）
+│   ├── OpusSupport.kt           协议侧的固定东西：帧长、PCM 格式名、状态行文字
+│   ├── OpusEncoder.kt           上行编码（帧长自己定：固定 10 ms = 480 样本一包）
 │   ├── OpusDecoder.kt           下行解码（输出帧长按实际样本数，不假设）
 │   ├── MicUplink.kt             AudioRecord 采集 + 编码线程
 │   └── SpeakerDownlink.kt       包队列 + 解码线程 + 样本环形缓冲 + AudioTrack 写入线程
-└── service/
-    └── CaptureService.kt        麦克风前台服务（通知 + WakeLock，Android 14+ microphone 类型）
+├── service/
+│   └── CaptureService.kt        会话前台服务（常驻通知 + WakeLock；通知按钮发广播回界面）
+└── update/
+    ├── UpdateChecker.kt         查本仓库 GitHub Releases，比 versionCode 判新旧
+    ├── UpdateDownloader.kt      下载 `.apk` 到应用私有外部目录的 `update/`
+    └── UpdateInstaller.kt       经 FileProvider 把安装包交给系统安装器
+```
+
+Native 侧（**Gradle 不编译**，只是入库产物 + 备查源码）：
+
+```
+app/src/main/cpp/                重建 `libpvopus.so` 的源码（`pv_opus.cpp` 的 JNI 转发层）
+app/src/main/jniLibs/arm64-v8a/libpvopus.so    libopus 1.5.2 + 转发层，预编译入库
 ```
 
 ## 没有的东西（刻意的）
 
-* **没有 JNI / CMake / NDK / C 代码**：Opus 编解码全部走系统 `MediaCodec`（`audio/opus`）。
-* **没有 TLS 与证书信任绕过**：新版协议就是明文 `ws://` + `usesCleartextTraffic="true"`。
+* **Gradle 构建不跑 native 编译**：Opus 用的是**预编译入库**的
+  `jniLibs/arm64-v8a/libpvopus.so`（内置 libopus 1.5.2 + `cpp/pv_opus.cpp` 的 JNI 转发层），
+  所以 `./gradlew` **不需要 NDK / CMake**，CI 也不用装。要重建那个 `.so` 才需要 NDK，
+  走 `tools/automation/build_opus_android.py`（一次性工具，产物入库）。
+* **只有 `arm64-v8a` 一个 ABI**：主流手机都是它。其它 ABI 上没有 `.so`，Opus 不可用，
+  状态栏会写明原因（**不静默降级**）。
+* **不用系统 `MediaCodec` 做 Opus**：Android 上**从来没有 `audio/opus` 这个 mime**，系统
+  Opus codec 注册的是 `audio/raw` / `audio/ogg;codecs=opus` / `audio/webm;codecs=opus`，
+  后两者只认容器封装，喂裸 Opus 包会**照单全收并输出垃圾 PCM（满屏刺啦且不报错）**。
+  想吃裸包就得自己实现 Ogg / WebM 封装，那是拿「省一个依赖」换「自己维护一个协议」。
+  （`audio/OpusSupport.kt` 里那句「探测」因此**只剩诊断**，不是第二条实现路径。）
+* **不做「无条件信任所有证书」**：见下节 —— 只对私有网段放宽。
+
+## 传输与证书（DESIGN.md §4.1.2）
+
+电脑端**只监听 HTTPS**，证书是**每台机器自己签的**（CA + 叶证书两级，存 `~/.purevox/ca/`）。
+
+* **为什么必须 TLS**：网页版客户端的麦克风靠 `getUserMedia`，它**只在安全上下文里可用** ——
+  `http://192.168.x.x` 不是安全上下文，浏览器直接拒绝，**没有任何绕过办法**。
+* **本客户端怎么做**（`net/LocalTls.kt`）：只对**私有网段 / 环回 / 链路本地**地址放宽校验
+  （这些地址公网不可路由，威胁模型与「局域网无鉴权」一致）；**公网地址与域名一律走系统默认校验**。
+* **想去掉证书警告**：在手机上打开 `https://<电脑IP>:59123/ca-cert` 下载 CA，再走系统
+  「安装证书 → CA 证书」（Android 只接受 `basicConstraints: CA:TRUE` 的证书，所以电脑端签的是
+  CA + 叶两级，不是一张自签）。不想装也行，网页版点一次「继续」即可。
+
+## 自动发现（不用抄 IP）
+
+电脑端服务一起来就把自己广播成 mDNS **`_purevox._tcp.local.`**（随服务启停，TXT 只带
+`v=<显示版本>` 与 `proto=<协议号>`）。客户端用系统自带的 `NsdManager`（零依赖、零权限）找它，
+找到就直接连 —— **没有「选哪台电脑」的下拉**：局域网里就一台电脑，用户想连的是**正在跑服务**
+的那台。
+
+* **服务没开就扫不到**，这是预期行为，不是二维码坏了。
+* 「**重新发现**」与「**重新连接**」是**两件事、两个按钮**：换网络才需要重新发现；只是掉线、
+  服务还在时，重新连接立刻就好。
+* 组播被交换机挡了、开了 AP 隔离时，退回手工填电脑 IP（或直接粘电脑端给的网址）。
+
+## 后台保活（`service/CaptureService.kt`）
+
+**服务范围 = 整个会话**：只要「已连接」或「正在推流」就挂常驻通知（不是只有麦克风在用才挂）。
+不做前台服务的话，Android 9+ 后台拿不到麦克风、Android 12+ 还会被系统直接掐掉。
+
+* 前台服务类型：麦克风在用时 `microphone|dataSync`，只是保活连接时 `dataSync` ——
+  **哪个在用就报哪个**（Android 14 起按实际用途校验，不能超报）。
+* 通知带两个按钮「**停止推流**」「**断开连接**」，它们发**广播**回界面（`MainActivity` 的
+  `notifReceiver`）—— 服务本身**不认识协议**，界面是唯一的编排者。
+* 「后台保活」卡片里另有「忽略电池优化设置」入口
+  （`ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`），并常驻显示当前是否已忽略。
+
+## 应用内更新（`update/`）
+
+**手动**触发（不自动检查：一打开就弹更新对低频工具是打扰），数据源就是本仓库的
+GitHub Releases，**与电脑端更新检查同一份数据**。
+
+* **比较依据是 tag 的完整时间戳**映射出的 `yyMMddHHmm`（`v2026.10.17.2359` → `2610172359`）
+  与安装包 `versionCode` 比整数 —— 与 `tools/automation/version.py` 同一套算法。显示版本
+  `yy.M.d` 同日会重复，比它没用。
+* **开发构建（`versionCode = 1`）不下结论**，只报「开发构建」。
+* 产物按 **`.apk` 后缀**认领（不看版本号）；下载落应用私有外部目录的 `update/`，经
+  `FileProvider`（`res/xml/file_paths.xml`）交系统安装器，需 `REQUEST_INSTALL_PACKAGES`。
+* 三步状态机 **检查 → 下载 → 安装**，界面按状态卡按钮，**不许跳步**。
+
+## 输入：打字同步 / 长文本 / 退格（`PvEditText.kt`）
+
+一个输入框，两种用法：
+
+* **打字同步**（开关）：每敲一次就转发并**清空**本地框，观感像「直接打在电脑上」。
+* **长文本**：内容留在本地，按「**发送**」把攒好的一整段一次性发出（同一个 `text` 消息，
+  只是时机不同）；「**清空**」只清本地。
+* **退格**：`PvEditText` 包了一层 `InputConnectionWrapper` —— **框里空着的时候按删除键**，
+  把 Android `KEYCODE_DEL` 转发给电脑（映射成 PC Backspace），用来改电脑端已经打错的字；
+  框里有字时就是普通的本地删除。
+* 未连接、或电脑端的「远程输入 / 打字同步」没开时会明确提示，**不静默丢弃**。
+
+## 图标
+
+`res/mipmap-*` 与桌面版**同一套 P + 渐变**，由 `tools/automation/gen_icons.py` 生成
+（产物入库、**不参与 CI**）：五档密度的传统 `ic_launcher{,_round}.png`（API < 26 用）、
+`ic_launcher_foreground.png`（108dp 画布、P 落在 72dp 安全区）、`ic_launcher_monochrome.png`
+（单色剪影），以及 `mipmap-anydpi-v26/{ic_launcher,ic_launcher_round}.xml`（背景 + 前景 +
+`<monochrome>`，供 Android 13+ 主题图标着色）。**改图标一律改脚本再重跑**，别手改 PNG / XML。
 
 ## 构建
 
@@ -67,8 +169,13 @@ cd android
 ./gradlew :app:assembleRelease    # 产物 app/build/outputs/apk/release/app-release.apk
 ```
 
-需要 JDK 17 与 Android SDK（`compileSdk 34`）。`gradle/wrapper/gradle-wrapper.jar` 已入库，
-不要替换；`gradle-wrapper.properties` 钉的是 Gradle 8.9（AGP 8.7.3 的最低要求）。
+需要 JDK 17 与 Android SDK（`compileSdk 34`）——**不需要 NDK / CMake**（Opus 是预编译入库的
+`.so`，见上）。`gradle/wrapper/gradle-wrapper.jar` 已入库，不要替换；
+`gradle-wrapper.properties` 钉的是 Gradle 8.9（AGP 8.7.3 的最低要求）。
+
+CI 打包时会传 `-PpvVersion=<年.月.日>` 与 `-PpvVersionCode=<yyMMddHHmm>`（见
+`tools/automation/version.py`）：**应用内更新靠 `versionCode` 判新旧**，本机不带参数就退回
+`versionCode = 1` + `versionName = "1.0"`（于是应用内更新会报「开发构建」）。
 
 ### release 签名
 
@@ -115,6 +222,10 @@ Android 12 及更早会忽略它继续用原密钥 —— 本项目 `minSdk = 24
 | 行为 | 起始版本 |
 | --- | --- |
 | `AudioRecord` / `AudioTrack` 的 `ENCODING_PCM_FLOAT` | API 23（minSdk 24 覆盖） |
-| `MediaFormat` 的 `opus-frame-duration-us` | API 29；不认这个 key 时自动降级 |
-| `startForeground(…, FOREGROUND_SERVICE_TYPE_MICROPHONE)` | API 29；24~28 用旧的双参重载 |
+| 自适应图标（`mipmap-anydpi-v26`） | API 26 |
+| `REQUEST_INSTALL_PACKAGES`（应用内更新装包） | API 26 |
+| `startForeground(…, FOREGROUND_SERVICE_TYPE_*)` | API 29；24~28 用旧的双参重载 |
 | `POST_NOTIFICATIONS` 运行时申请 | API 33 |
+| `<monochrome>` 主题图标 | API 33 |
+| `FOREGROUND_SERVICE_MICROPHONE` / `_DATA_SYNC` 权限与类型校验 | API 34 |
+| `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` 需用户确认 | API 23 起（各版本弹窗措辞不同） |
