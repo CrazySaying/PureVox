@@ -327,11 +327,15 @@ wasm 只要浏览器有 `WebAssembly` 就行。帧长按引擎 hop 配（`channe
   ——同日发两次时显示版本相同，靠时分才能分出新旧。解析见 `version::parse_stamp`。
   开发构建没有 CI 注入的时间戳（`version::is_dev()`），此时只报「开发构建」，
   **绝不拿 Cargo 的 `0.1.0` 去和线上比出一个假结论**。
-- **产物匹配只看后缀**：Windows `-setup.exe` → `.msi`；Linux `.AppImage` → `.deb` →
-  `.rpm`；Android `.apk`。CI 统一重命名产物，后缀因此稳定。
+- **产物匹配只看后缀**：Windows `-setup.exe`（NSIS；Windows 只发 exe，不出 MSI，见
+  `src-tauri/tauri.windows.conf.json` 钉死 `bundle.targets=["nsis"]`）；Linux `.AppImage` →
+  `.deb` → `.rpm`；Android `.apk`。CI 统一重命名产物，后缀因此稳定。
 - **安装是平台实现**（`update/install_<platform>.rs`）：Windows 用 NSIS 静默
   `/S /UPDATE /NS /R`，且**必须先退进程再装**（安装器会拦下正在运行的 exe）；
   Linux 仅 AppImage 能自替换；其余明确「不支持 + 给出 release 页面」，**不静默失败**。
+- **Android 侧的应用内更新**（`android/.../update/`）是**同一数据源、同一判定**的另一端实现：
+  手动触发，比较 tag 时间戳映射出的 `yyMMddHHmm` 与安装包 `versionCode`，产物按 `.apk` 匹配，
+  下载后经 `FileProvider` 交系统安装器（见 AGENTS.md §1.3）。
 - 状态同时进调试接口 `/debug` 的 `update` 段（与界面同源，AGENTS.md §1.2）。
 
 ---

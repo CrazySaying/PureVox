@@ -156,6 +156,24 @@ release 构建同样保留（不允许用编译开关剔除）。
     其余平台返回明确的不可用原因（Linux 需 uinput/XTEST），不静默失败。
   - **安全取舍（明确记录）**：局域网同网段可直连、**无鉴权**，因此远程输入默认关闭、
     界面常驻显示状态、有一键关闭；不要在没有开关保护的前提下默认开启按键注入。
+- **Android 客户端（`android/`，APK）**：与上面三件能力对同一个 WebSocket 的另一端，
+  单 Activity + Material3 **卡片式**布局（连接 / 功能 / 远程输入 / 后台保活 / 更新），
+  底部「诊断」读数与日志**默认收起**、标题行点击展开（状态面板不消失，只是不再一上来占满屏）。
+  - **会话保活**（`service/CaptureService.kt`）：只要「已连接」或「正在推流」就挂常驻通知
+    （前台服务类型 `microphone|dataSync`，只报在用的那个），通知带「停止推流 / 断开连接」
+    两个按钮 —— 按钮发**广播**回界面（`MainActivity` 的 `notifReceiver`），服务不认识协议。
+    另有「忽略电池优化」入口（`ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`）。
+  - **应用内更新**（`update/{UpdateChecker,UpdateDownloader,UpdateInstaller}.kt`）：
+    **手动**检查（不自动），数据源与本仓库 GitHub Releases 一致；比较依据是 tag 的完整时间戳
+    映射出的 `yyMMddHHmm` 与安装包 `versionCode` 比整数（开发构建 `versionCode=1` → 不下结论）；
+    产物按 `.apk` 后缀匹配；下载落应用私有外部目录，经 `FileProvider`（`res/xml/file_paths.xml`）
+    交系统安装器，需 `REQUEST_INSTALL_PACKAGES`。
+  - **长文本 / 退格**：输入框是 `PvEditText`（包一层 `InputConnectionWrapper`）——「打字同步」
+    照旧逐次转发并清空；**空框里按删除键**则把 Android `KEYCODE_DEL` 转发给电脑（映射成 PC
+    Backspace），框里有字时本地删。另有「发送 / 清空」按钮把攒好的一整段一次性发出（同一个
+    `text` 消息，只是时机不同）。
+  - 图标见上（自适应 + monochrome），文案在 `res/values/strings.xml`（Android 侧独立，
+    **不是**桌面 `ui/i18n.js` 那份字典）。
 - **媒体行（音效板 / 音乐播放器）**：`soundpad` / `player` 是**处理行**（DESIGN.md §4），
   在自身链位置把媒体样本与信号相加（挂链尾 = 后级直通；拖到降噪之前则参与处理）。
   **这两类行的全部控件由 `ui/media.js` 独占**（音效网格 / 走带 / 每个音效的音量与热键）；
@@ -198,9 +216,10 @@ release 构建同样保留（不允许用编译开关剔除）。
   - **比较依据 = tag 的完整时间戳，不是显示版本号**：显示版本 `yy.M.d` 同日会重复，
     靠 `version::STAMP`（`yyyy.MM.dd.HHmm`）分新旧（`version::parse_stamp`）。
     开发构建没有 CI 注入的时间戳，此时**不下「已是最新」的结论**，报「开发构建」。
-  - **产物按文件名后缀匹配，不看版本号**（同上）：Windows `-setup.exe` → `.msi`；
-    Linux `.AppImage` → `.deb` → `.rpm`；安卓 `.apk`。`release.yml` 统一重命名产物，
-    后缀因此稳定。
+  - **产物按文件名后缀匹配，不看版本号**（同上）：Windows `-setup.exe`（NSIS；
+    **Windows 只发 exe，不出 MSI**——`src-tauri/tauri.windows.conf.json` 把 Windows 的
+    `bundle.targets` 钉成 `["nsis"]`）；Linux `.AppImage` → `.deb` → `.rpm`；安卓 `.apk`。
+    `release.yml` 统一重命名产物，后缀因此稳定。
   - **安装分平台**（`update/install_{windows,linux,other}.rs`）：Windows = NSIS 静默
     `/S /UPDATE /NS /R`，**必须先退进程再装**（安装器开头有 `CheckIfAppIsRunning` 会拦下
     正在运行的 exe，故用脱离的 cmd 先歇几秒再拉安装器，随后 `app.exit(0)`）；
@@ -273,9 +292,13 @@ release 构建同样保留（不允许用编译开关剔除）。
   `RegisterHotKey` + 规范串「`Ctrl+Alt+Shift+Win` 顺序」，空串=不监听，注册结果进 `ui`）；
   **提示音**（`cues.rs` 自合成 6 套预设，start 上行 / stop 下行，`PlaySound` SND_MEMORY）；
   **设置**（`~/.purevox/settings.json`：语言 / 热键 / 提示音；顶栏「设置」面板，键位可录制）；
-  中英文（`ui/i18n.js`，中文即 msgid，顶栏「EN/中」）。应用图标 `icons/` 与 Android 的
+  中英文（`ui/i18n.js`，中文即 msgid，顶栏「EN/中」）。应用图标 `src-tauri/icons/` 与 Android 的
   `res/mipmap-*` 由 `tools/automation/gen_icons.py` 生成（**不参与 CI**，一次性生成、产物入库；
-  跨平台同一条命令、产物逐字节相同；P 的矢量定义与改法见 TAURI3.md §3.5.1）。打包用
+  跨平台同一条命令、产物逐字节相同；P 的矢量定义与改法见 TAURI3.md §3.5.1）。
+  **Android 图标 = 规范自适应图标**（与桌面版同一套 P + 渐变，不另画）：脚本一并写出
+  `mipmap-anydpi-v26/{ic_launcher,ic_launcher_round}.xml`（含 `<monochrome>`，供 Android 13+
+  主题图标着色），并生成五档密度的 `ic_launcher_foreground.png`（108dp 画布、P 落在 72dp 安全区）、
+  `ic_launcher_monochrome.png`（单色剪影）与传统 `ic_launcher{,_round}.png`（API < 26 用）。打包用
   `cargo tauri build`。
 
 ---
@@ -326,10 +349,12 @@ release 构建同样保留（不允许用编译开关剔除）。
 6. **发版 tag**：主线 `v<yyyy.MM.dd.HHmm>`。CI 失败、从未生成 release 的 tag 必须删除
    （`git tag -d <tag> && git push origin :refs/tags/<tag>`），否则会截断下一个 release 的提交记录。
    **应用/包版本号 = 年.月.日**：由 `tools/automation/version.py`（唯一实现，跨平台）从 tag
-   （或本机当前 UTC）推导。`yy.m.d` **只有三段**，因为 Tauri 要 semver 三段、MSI 的
-   ProductVersion 限 major≤255 / minor≤255 / build≤65535（`2026.10.8` 直译会报
-   `major number cannot be greater than 255`）。故映射为 **major = 年-2000、minor = 月、
+   （或本机当前 UTC）推导。`yy.m.d` **只有三段**：Tauri 要 semver 三段；历史上还要出 MSI，
+   MSI 的 ProductVersion 限 major≤255 / minor≤255 / build≤65535（`2026.10.8` 直译会报
+   `major number cannot be greater than 255`），故映射为 **major = 年-2000、minor = 月、
    build = 日**（上限 31，远低于 65535）；如 tag `v2026.10.08.1430` → 版本 `26.10.8`。
+   **现在 Windows 只发 NSIS exe，但这个三段映射保持不变**（显示版本 / 产物名 / 更新说明
+   都按它走）。
    **同日多次发布靠 tag 的时分区分**（tag 仍是完整时间戳 `v2026.10.08.1430`），
    更新检查比较的就是 tag（见 `src/update/`），因此显示版本重复不影响更新判定。
    版本写入 `src-tauri/.build-version.json` 并由 `cargo tauri build --config` 覆盖（不提交该文件）；
@@ -351,7 +376,7 @@ release 构建同样保留（不允许用编译开关剔除）。
        target，预热 debug 三门禁 + `cargo tauri build`，再 save 四个桶（cargo registry /
        target-debug / target-release / cargo-tauri binary；`continue-on-error`，同键已存在即成功）。
      - `release.yml`：tag `v*` 或手动 → 三平台并行：
-       **Windows**（门禁 + `cargo tauri build` + `assert_bundle.py --smoke` → MSI/NSIS）；
+       **Windows**（门禁 + `cargo tauri build` + `assert_bundle.py --smoke` → NSIS exe）；
        **Linux**（`ubuntu-24.04`：装 WebKitGTK/ALSA/rpm 依赖 + 门禁 + `cargo tauri build` +
        `assert_bundle.py --smoke` + `test_packages.py`（deb→ubuntu / rpm→fedora 容器安装验证）→
        deb/rpm/AppImage）；
@@ -502,7 +527,8 @@ release 构建同样保留（不允许用编译开关剔除）。
 - **构建产物位置**（找东西时别找错盘）：Windows 走 `src-tauri/target/`（D 盘，
   一次 `clippy --all-targets` 后 `debug/deps` 能到 15 GB、`debug/incremental` 11 GB，
   后者可随时删、零风险）；WSL 走 `/root/purevox-target/`。
-  `cargo tauri build` 约 5 分钟编译 + 4 分钟打包，产物在 `target/release/bundle/{msi,nsis}/`。
+  `cargo tauri build` 约 5 分钟编译 + 4 分钟打包，产物在 `target/release/bundle/nsis/`
+  （Windows 只出 exe；Linux 仍在 `bundle/{deb,rpm,appimage}/`）。
 
 ---
 

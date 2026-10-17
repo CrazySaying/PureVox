@@ -5,7 +5,8 @@
 跑通一项就把标注去掉并补上实测结果。
 
 **进度**：
-- Windows hello world 已跑通（编译、运行、前端到 Rust 的 IPC、MSI / NSIS 打包）。
+- Windows hello world 已跑通（编译、运行、前端到 Rust 的 IPC、NSIS 打包 —— Windows 只出 exe，
+  不出 MSI，见 `src-tauri/tauri.windows.conf.json`）。
 - 调试面板 + 本机 HTTP 调试接口（`127.0.0.1:47821`）已在 Windows 实现并验证：CPU / 内存 / GPU、
   设备枚举（cpal / WASAPI）。
 - 输入采集 + 重采样到 48 kHz 已实现（2026-10-07 实测）：16 kHz（Mic Device）、44.1 kHz 双声道（Realtek）、
@@ -63,6 +64,12 @@
   Linux = 虚拟驱动（`audio/virtual_mic.rs`，照 legacy 建 `purevox_out`+monitor+`purevox_mic`，创建/移除），
   Windows = VB-CABLE 下载/教程/检测（`ui/drivers_windows.js`）。AEC 远端在 Linux 走 `parec` 监听 monitor
   （`audio/loopback_linux.rs`），候选由 `list_loopback_targets` 给出。
+- **Tauri 依赖升到 `3.0.0-alpha.5`**（2026-10-14 上游发布）：`tauri` / `tauri-runtime-wry`
+  alpha.4 → alpha.5、`tauri-build` alpha.3 → alpha.4（`tauri-codegen` / `tauri-macros` /
+  `tauri-utils` 随之到 alpha.4）；CLI 钉 `TCLI_VER=3.0.0-alpha.5`，同时把 `CACHE_GEN` 提到 **2**
+  （缓存键里含着 `TCLI_VER` 与代数，旧桶整体作废、必须重暖）。各 crate 版本号**不同步**，
+  以 crates.io 实际发布为准（见 §2 版本锚点）。改了 `Cargo.toml` 之后，`src-tauri/Cargo.lock`
+  由下一次 `cargo build` / `cargo update` 自动重新解析并生成，别手改锁文件。
 
 > 信息收集日期：2026-10-07。Tauri 3 处于 alpha，版本号、API 和文档都可能变化，
 > 引用任何结论前先核对下文「版本锚点」是否仍是最新。
@@ -122,7 +129,7 @@
 
 | 项目 | 状态 |
 | --- | --- |
-| Tauri 3 最新版本 | `3.0.0-alpha.4`（2026-10-01；alpha.0 发布于 2026-09-13） |
+| Tauri 3 最新版本 | `3.0.0-alpha.5`（2026-10-14；alpha.0 发布于 2026-09-13） |
 | Tauri 2 最新稳定版 | `2.12.1`（2026-09-30） |
 | 3.0 里程碑进度 | 约 25%，无截止日期（GitHub milestone #5） |
 | 官方态度 | 迁移指南原文：alpha 用于试用新的 webview 运行时模型和反馈问题，**生产应用保持 2.x** |
@@ -158,7 +165,7 @@ Tauri 3 的官方文档站 `v3.tauri.app` 是 v2 文档的一个分支，只新�
 | 4 | Prerequisites | 各平台系统依赖（v2 内容，Linux 包列表仍含 appindicator，见 3.2 节说明） | `https://v3.tauri.app/start/prerequisites/` |
 | 5 | Embedding External Binaries（sidecar） | 随应用打包外部可执行文件；若选择保留 Python 引擎作为 sidecar 时需要 | `https://v3.tauri.app/develop/sidecar/` |
 | 6 | 各 crate 的 CHANGELOG | 每个 alpha 的精确变更，比文档更新更快 | tauri 仓库 `crates/*/CHANGELOG.md` |
-| 7 | API 参考（docs.rs） | Rust API 精确签名 | `https://docs.rs/tauri/3.0.0-alpha.4/` |
+| 7 | API 参考（docs.rs） | Rust API 精确签名 | `https://docs.rs/tauri/3.0.0-alpha.5/` |
 | 8 | 官方示例 | 可直接编译的最小工程 | tauri 仓库 `examples/` |
 
 ### 2.1 适合固化（离线、钉版本）的形式
@@ -183,15 +190,15 @@ Tauri 3 的官方文档站 `v3.tauri.app` 是 v2 文档的一个分支，只新�
 
 | 对象 | 版本 / 提交 |
 | --- | --- |
-| tauri（crate 与 CLI） | `3.0.0-alpha.4`，tag `tauri-v3.0.0-alpha.4`，提交 `a8703ee487c659efbebb27c799752d523a6d09a1` |
-| tauri-runtime-wry | `3.0.0-alpha.4` |
-| tauri-runtime-cef | `3.0.0-alpha.5` |
-| tauri-build / tauri-bundler | `3.0.0-alpha.3` |
-| @tauri-apps/cli（npm `next`） | `3.0.0-alpha.4` |
-| @tauri-apps/api（npm `next`） | `3.0.0-alpha.2` |
+| tauri（crate 与 CLI） | `3.0.0-alpha.5`，tag `tauri-v3.0.0-alpha.5`，提交 `1991873f5e2baa68773f21465f61baa93077498f` |
+| tauri-runtime-wry | `3.0.0-alpha.5` |
+| tauri-runtime-cef | `3.0.0-alpha.6` |
+| tauri-build / tauri-bundler | `3.0.0-alpha.4` |
+| @tauri-apps/cli（npm `next`） | `3.0.0-alpha.5` |
+| @tauri-apps/api（npm `next`） | `3.0.0-alpha.3` |
 | tauri-docs `v3` 分支 | 提交 `f2e14b4fdba36ac35a61ce309846b53c45ec606e` |
 
-注意：各 crate 版本号**不同步**（如 build 是 alpha.3、runtime-cef 是 alpha.5），
+注意：各 crate 版本号**不同步**（如 build 是 alpha.4、runtime-cef 是 alpha.6），
 不要假设「全部写同一个版本号」，以 crates.io 实际发布为准。
 
 ---
@@ -253,7 +260,7 @@ Fedora / Arch / openSUSE 等发行版的包名见 prerequisites 页对应标签�
 本仓库**只用 Cargo 版 CLI**（`cargo tauri ...`），不引入 npm 版，仓库里也就没有 package.json / node_modules：
 
 ```sh
-cargo install tauri-cli --version "^3.0.0-alpha" --locked   # 约 2.5 分钟，装出 cargo-tauri 3.0.0-alpha.4
+cargo install tauri-cli --version "^3.0.0-alpha" --locked   # 约 2.5 分钟，装出 cargo-tauri 3.0.0-alpha.5
 ```
 
 ### 3.4 工程布局（hello world，Windows 已实测）
@@ -262,7 +269,7 @@ cargo install tauri-cli --version "^3.0.0-alpha" --locked   # 约 2.5 分钟，�
 
 | 路径 | 作用 |
 | --- | --- |
-| `src-tauri/Cargo.toml` | 依赖：`tauri` 3.0.0-alpha.4、`tauri-runtime-wry` 3.0.0-alpha.4、`tauri-build` 3.0.0-alpha.3；调试与设备：`sysinfo` 0.39、`cpal` 0.18、`windows` 0.62（仅 Windows）；音频：`rubato` 5（重采样）、`rtrb` 0.4（无锁环）、`rustfft` 6（调试频谱） |
+| `src-tauri/Cargo.toml` | 依赖：`tauri` 3.0.0-alpha.5、`tauri-runtime-wry` 3.0.0-alpha.5、`tauri-build` 3.0.0-alpha.4；调试与设备：`sysinfo` 0.39、`cpal` 0.18、`windows` 0.62（仅 Windows）；音频：`rubato` 5（重采样）、`rtrb` 0.4（无锁环）、`rustfft` 6（调试频谱） |
 | `src-tauri/Cargo.lock` | 锁定依赖，**提交进仓库**（alpha 期间各 crate 频繁发版，靠它保证可复现） |
 | `src-tauri/build.rs` | `tauri_build::build()` |
 | `src-tauri/src/main.rs` | 选 wry 运行时，启动调试采样 / HTTP / 设备枚举，注册命令 `debug_snapshot`、`refresh_devices` |
@@ -283,7 +290,7 @@ Tauri 3 与 2 在骨架上唯一的差别：`main` 里必须 `.runtime(tauri_run
 | --- | --- |
 | `cargo build` | 首次约 1 分钟，产出 `target/debug/purevox.exe` |
 | `cargo tauri dev` | 编译并运行开发版 |
-| `cargo tauri build` | release 版 + 两个安装包：`target/release/bundle/msi/PureVox_0.1.0_x64_en-US.msi`（2.9 MB）与 `target/release/bundle/nsis/PureVox_0.1.0_x64-setup.exe`（2.0 MB）；裸 exe 8.4 MB |
+| `cargo tauri build` | release 版 + 安装包：`target/release/bundle/nsis/PureVox_<版本>_x64-setup.exe`；裸 exe 8.4 MB。**Windows 只出这一个 exe**（`bundle.targets=["nsis"]`），不再出 MSI |
 
 `cargo tauri build` 首次会从 GitHub 下载 WiX 与 NSIS 工具（tauri-apps/binary-releases），需要能访问 GitHub。
 
@@ -355,13 +362,17 @@ Android 那段写死了仓库路径，于是「试跑到临时目录」反而把
 | `src-tauri/icons/icon.icns`（icp4…ic10） | macOS（配置引用，但本项目不打包 macOS） |
 | `src-tauri/icons/ios/AppIcon.appiconset/` | iOS 的 20 个槽位 + `Contents.json`（见下） |
 | `src-tauri/icons/tray_running.png` / `tray_stopped.png` | 托盘 64px。**运行态 = 蓝渐变底 + 浅蓝 P；停止态 = 暗灰底 + 暗蓝 P** —— 整套一起压暗才有「熄灭」的观感，只压底色的话 P 仍是亮蓝，在暗灰底上比运行时还跳，一眼看不出停了（AGENTS §1.2 托盘）。P 高占 72%：64px 下再小就看不清 |
-| `android/app/src/main/res/mipmap-*/` | 五档密度 × `ic_launcher` / `_round` / `_foreground` |
+| `android/app/src/main/res/mipmap-*/` | 五档密度 × `ic_launcher` / `_round`（传统，API < 26）/ `_foreground` / `_monochrome` |
+| `android/app/src/main/res/mipmap-anydpi-v26/{ic_launcher,ic_launcher_round}.xml` | 自适应图标声明（API 26+）：背景 + 前景 + **`<monochrome>`**（Android 13+ 主题图标）；由脚本写出，勿手改 |
 | `android/app/src/main/res/drawable/ic_launcher_bg.xml` | 自适应图标背景层（深蓝竖向渐变，满幅无圆角） |
 
 **Android 自适应图标为什么不是 `cargo tauri icon` 那套**：它从透明底源图取不到主色，
 `ic_launcher_background` 被填成 `#FFFFFF`；而前景层是带圆角底的整图，四角透明——系统一裁就露出
-白底，图标变成「白底 + 一个圆角深蓝方块」。这里改成标准两层：背景是**同一条渐变**的矢量，
-前景只有安全区里的 P，裁切处两边同色同位置，接缝看不出来。
+白底，图标变成「白底 + 一个圆角深蓝方块」。这里改成标准三层：背景是**同一条渐变**的矢量，
+前景只有安全区里的 P（108dp 画布、72dp 安全区），裁切处两边同色同位置，接缝看不出来；
+第三层 `monochrome` 是**单色剪影**（描边与本体同色，只有 alpha 有意义），供 Android 13+
+主题图标整体着色 —— 少了它，开了主题图标的手机会把我们的图标画成一个灰底方块。
+`ic_launcher_round.xml` 与方形指向同一套层（API 26+ 圆形设备走它，而非退回传统 PNG）。
 
 #### iOS：必须是 appiconset，不是裸 PNG
 
@@ -415,7 +426,7 @@ Android 那段写死了仓库路径，于是「试跑到临时目录」反而把
   - `warm-cache.yml`：**全仓库唯一缓存写入者**，手动；矩阵 Windows+Linux **冷构建**（不恢复 target 缓存）
     debug 三门禁 + `cargo tauri build`，再 save 四个桶（`continue-on-error`，同键已存在即视为成功）。
   - `release.yml`：tag `v*` 或手动 → 三平台并行：
-    - **Windows**：门禁 → `cargo tauri build` → `assert_bundle.py --smoke` → MSI/NSIS。
+    - **Windows**：门禁 → `cargo tauri build` → `assert_bundle.py --smoke` → NSIS exe（只此一个）。
     - **Linux**（`ubuntu-24.04`）：装 WebKitGTK/ALSA/rpm 依赖 → 门禁 → `cargo tauri build` →
       `assert_bundle.py --smoke` → `test_packages.py`（deb→ubuntu / rpm→fedora 容器安装验证）→
       deb/rpm/AppImage。
@@ -460,7 +471,7 @@ Android 那段写死了仓库路径，于是「试跑到临时目录」反而把
 （暂无）
 
 已决（写回 §1/§3）：
-- 用 **Tauri 3 alpha**（`3.0.0-alpha.4`）+ **wry**（系统 WebView2，包小）。
+- 用 **Tauri 3 alpha**（`3.0.0-alpha.5`）+ **wry**（系统 WebView2，包小）。
 - 音频引擎**用 Rust 原生重写**（设备 I/O + onnxruntime Rust 绑定），不挂 Python sidecar。
 - **Linux 打包依赖**：wry 需 WebKitGTK 4.1、cpal 需 ALSA、rpm 需 rpmbuild，托盘不再需 appindicator
   （见 §3.2）；Linux 出包用 `ubuntu-24.04`（24.04），**要求 glibc ≥ 2.39**（onnxruntime 预编译包所致）。
