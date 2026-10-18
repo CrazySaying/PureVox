@@ -415,6 +415,31 @@ Android 那段写死了仓库路径，于是「试跑到临时目录」反而把
   - 从智能体 shell 启动的程序窗口是**最小化**的，先 `ShowWindow(hwnd, 4)`（`SW_SHOWNOACTIVATE`，不抢焦点）再截。
   - `Process.MainWindowHandle` 可能指向 26×26 的辅助窗口，要用 `EnumWindows` 按标题 `PureVox` 找主窗口。
 
+**Linux 桌面会话里做无人值守验证**（`tools/automation/ui.py` 的会话子命令：`start` / `take` /
+`verify-update` / `stop`）：
+
+- 两条前置，缺一条 `ui.py list` 就是空的（不是没控件，是 a11y 桥没起来）：装 `python3-pyatspi`；
+  打开 GTK 的 a11y 总开关 `gsettings set org.gnome.desktop.interface toolkit-accessibility true`
+  （重装/精简安装后默认是 false）。
+- **会话总线上要有 `org.kde.StatusNotifierWatcher`**：GNOME 上这个角色由 appindicator 扩展提供，
+  扩展没启用（`gnome-extensions info ubuntu-appindicators@ubuntu.com` 显示 INACTIVE）时总线上
+  根本没有这个名字，而纯 Rust 的 `ksni` 把它当**硬错误** —— ≤26.10.18 的应用会**启动即 panic**
+  （`failed to register to the StatusNotifierWatcher`），用户连界面都看不到。`main.rs` 现已只把
+  「托盘不可用 + 原因」写进调试面板并继续跑；要复现/验证这个场景用 `ui.py start --private-bus`
+  （另起一条没有 watcher 的私有总线：老二进制在那里 panic，新二进制正常起）。总线真缺 watcher 时
+  `ui.py start` 会自动顶一个替身（`ui.py watcher`，只实现 ksni 用到的
+  `RegisterStatusNotifierItem` + `IsStatusNotifierHostRegistered`）。
+- **AT-SPI 跨不过总线**：`--private-bus` 起的实例，`ui.py click` / `verify-update` 找不到它的控件
+  （工具会提示换实例）。
+- 更新分流一条链验证（包已装好之后）：`ui.py start` → `ui.py verify-update deb`
+  （断言 `install_kind` == `deb` 且产物名以 `.deb` 结尾；跨格式兜底会让 deb 用户白下 140 MB 还装不上）
+  → `ui.py take '.update'` 看细节 → `ui.py stop`。开发构建用 `verify-update none`
+  （应在「没有 CI 时间戳」处停下并给原因，或 `unsupported`）。
+- **应用内「下载更新」在本机会失败**（报网络原因，不静默）：GitHub 的资产 CDN 在这条网络上基本
+  不可用（`gh release download` 15 分钟拿不到 76 MB 的包）。要手工取资产走 `gh-proxy.com`
+  （实测 ~370 KB/s），并用 GitHub API 自带的 digest 核对：
+  `gh api repos/<owner>/<repo>/releases/tags/<tag> --jq '.assets[] | "\(.name) \(.digest)"'`。
+
 ### 3.7 CI 与发版（2026-10-08 起，多平台：Windows + Linux + Android）
 
 纪律（规则正文见 AGENTS.md §2 第 7 条）：

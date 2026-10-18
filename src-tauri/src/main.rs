@@ -598,7 +598,16 @@ fn main() {
       if let Some(w) = app.get_webview_window("main") {
         let _ = w.set_title(&format!("PureVox {}", version::VERSION));
       }
-      setup_tray(app)?;
+      // 托盘：**失败不能致命**。`org.kde.StatusNotifierWatcher` 在 GNOME 上由 appindicator
+      // 扩展提供，扩展没启用（精简安装 / 关掉扩展）时总线上根本没有这个名字，ksni 直接返回
+      // 硬错误。引擎与主窗口跟托盘没关系，没有它照样能用 —— 报出原因继续跑。原来这里用 `?`
+      // 传播，结果是**启动即 panic**：用户连界面都看不到，更不会知道是托盘的问题
+      // （2026-10-18 在本机 GNOME + 扩展 INACTIVE 的会话里实测）。
+      if let Err(e) = setup_tray(app) {
+        let msg = format!("托盘不可用（{e}）——窗口与引擎照常，只是少了托盘的启动/停止/退出菜单");
+        eprintln!("PureVox: {msg}");
+        app.state::<SharedHub>().inner().push_ui("error", msg);
+      }
       // 读回上次选定的网络端口 / 广告地址。不读的话用户填的端口每次启动都白填
       // （hub 默认 59123），必须在第一次 `net_start` 之前。
       net::load_settings();

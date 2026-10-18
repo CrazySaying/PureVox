@@ -327,7 +327,11 @@ release 构建同样保留（不允许用编译开关剔除）。
   不靠模拟键鼠点界面（Windows 会拦截后台抢焦点，按键会打进别的窗口）。界面交互验证用
   Windows UI Automation（`TAURI3.md` 3.6 节）；**Linux 用 `tools/automation/ui.py`（AT-SPI）**——
   `list` 列控件、`click <可访问名>` 点按钮/勾选框（要 `DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/1000
-  DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus`），不要求人点。**少截图**，优先用调试接口读数。
+  DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus`），不要求人点。同一条链还有会话子命令：
+  `start`（起应用并等 `/debug`；会话总线真缺 SNI watcher 时自动顶替身）/ `take '<jq 表达式>'`（读快照）/
+  `verify-update <deb|rpm|appimage|none>`（点「更新 → 检查更新」，断言安装方式与**产物后缀对得上**，
+  失败返回非 0）/ `stop`（收掉自己起的进程）。前置与跨总线限制见 `TAURI3.md` 3.6 节。
+  **少截图**，优先用调试接口读数。
   **不许动系统的音量 / 静音**（只读不写；用户音量不是我们该改的状态）。
 - **测试自收尾**：任何启动进程的 shell 测试必须自己结束（PowerShell 用
   `try { … } finally { Get-Process purevox -ErrorAction SilentlyContinue | Stop-Process }`），
@@ -337,7 +341,11 @@ release 构建同样保留（不允许用编译开关剔除）。
   `devtools` 特性，release 保留）。JS 静态检查用项目 `opencode.json` 的 LSP + `ui/jsconfig.json`
   （`checkJs`，配合 `ui/globals.d.ts`）。
 - **外围**：系统托盘（启动/停止、显示/隐藏、退出；图标随运行状态在 `icons/tray_running.png` /
-  `tray_stopped.png` 间切换，菜单随语言与状态重建）；**窗口最小化/关闭都收到托盘**（不退出）；
+  `tray_stopped.png` 间切换，菜单随语言与状态重建）。**托盘注册失败不致命**：GNOME 上
+  `org.kde.StatusNotifierWatcher` 由 appindicator 扩展提供，扩展没启用时总线上没有这个名字、
+  ksni 直接报错 —— 此时只把「托盘不可用 + 原因」写进调试面板并继续跑（引擎与窗口跟托盘无关）；
+  原来在这里 `?` 传播 = 启动即 panic，用户连界面都看不到（2026-10-18 实测）；
+  **窗口最小化/关闭都收到托盘**（不退出）；
   开机自启（`autostart.rs`，写/删 `HKCU\...\Run`）；**启动/停止**（命令 `set_running`/`get_running`，
   界面顶栏按钮（启动绿/停止红）、托盘、全局热键共用；快照带 `running`）；**全局热键**（`hotkey.rs`：
   `RegisterHotKey` + 规范串「`Ctrl+Alt+Shift+Win` 顺序」，空串=不监听，注册结果进 `ui`）；
