@@ -29,40 +29,39 @@ fn home_dir() -> Result<PathBuf, String> {
 }
 
 pub fn config_dir() -> Result<PathBuf, String> {
-  // 单测**绝不许**碰用户真实的 `~/.purevox/`：`plan::*` 的集成测试会 `persist_plan`，
+  // 单测**绝不许**碰用户真实的 `~/.purevox/`：`audio/mod.rs` 的测试会 `persist_plan`，
   // 一次 `cargo test` 就能把开发者的会话计划覆盖成默认计划（2026-10-18 实际踩到）。
+  // 目录**按测试线程**各给一份（测试是并行跑的，共用一份又会互相覆盖）。
   #[cfg(test)]
-  if let Some(d) = test_dir::get() {
-    return Ok(d.clone());
-  }
+  return Ok(test_dir::get());
+  #[cfg(not(test))]
   Ok(home_dir()?.join(".purevox"))
 }
 
-/// 单测用的配置目录覆盖（只在 `cfg(test)` 下存在，测试里调一次 [`use_test_dir`] 即可）。
+/// 单测用的配置目录（`cfg(test)` 专属）：每个测试线程一份、懒建、互不干扰。
 #[cfg(test)]
 mod test_dir {
+  use std::cell::RefCell;
   use std::path::PathBuf;
-  use std::sync::OnceLock;
+  use std::sync::atomic::{AtomicU64, Ordering};
 
-  static DIR: OnceLock<PathBuf> = OnceLock::new();
-
-  pub fn get() -> Option<&'static PathBuf> {
-    DIR.get()
+  thread_local! {
+    static DIR: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
   }
+  static SEQ: AtomicU64 = AtomicU64::new(0);
 
-  pub fn init() {
-    DIR.get_or_init(|| {
-      let d = std::env::temp_dir().join("purevox-test-config");
-      let _ = std::fs::create_dir_all(&d);
-      d
-    });
+  pub fn get() -> PathBuf {
+    DIR.with(|d| {
+      let mut d = d.borrow_mut();
+      d.get_or_insert_with(|| {
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let p = std::env::temp_dir().join(format!("purevox-test-cfg-{}-{n}", std::process::id()));
+        let _ = std::fs::create_dir_all(&p);
+        p
+      })
+      .clone()
+    })
   }
-}
-
-/// 把配置目录指到临时目录（**测试专用**）：任何会落盘的测试先调它。
-#[cfg(test)]
-pub fn use_test_dir() {
-  test_dir::init();
 }
 
 pub fn session_path() -> Result<PathBuf, String> {

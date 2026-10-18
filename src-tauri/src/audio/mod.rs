@@ -405,12 +405,12 @@ mod tests {
 
   /// 测试用的管理器：**自给自足的计划**，而且**绝不碰用户真实配置**。
   ///
-  /// `AudioManager::new` 读的是真实 `~/.purevox/session.json`，直接用会让测试依赖本机
-  /// 配置（本机若有 AEC 行 / 选了真实设备，断言就会飘）；更糟的是这里的
-  /// `persist_plan` 会**写回**那个真实文件 —— 一次 `cargo test` 就把开发者的会话计划
-  /// 覆盖成默认计划（2026-10-18 实际踩到）。所以先把 `config_dir` 指到临时目录。
+  /// `AudioManager::new` 读的是 `config::config_dir()`：测试构建里它指向**本线程专属**的临时
+  /// 目录（见 `config.rs` 的 `test_dir`），所以既不会依赖本机配置（本机若有 AEC 行 / 选了真实
+  /// 设备，断言就会飘），也**不会写回**开发者真实的 `~/.purevox/session.json`
+  /// —— 一次 `cargo test` 把会话计划覆盖成默认计划，2026-10-18 实际踩过。
+  /// 目录按线程分是因为测试并行跑：共用一份的话两个测试的 `persist_plan` 会互相覆盖。
   fn mgr() -> AudioManager {
-    crate::config::use_test_dir();
     let m = AudioManager::new(crate::debug::DebugHub::new());
     m.persist_plan(Plan::default()).expect("写入测试计划");
     m
