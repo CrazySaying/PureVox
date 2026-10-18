@@ -20,6 +20,8 @@
 //! 输入采集线程（原生→48k hop）→ 列工作线程（混合 + 处理链）→ 输出播放线程。
 
 pub mod capture;
+/// 设备池（DESIGN.md §6.5）：每个 `(设备, 角色)` 只打开一次 + 引用计数
+pub mod device_pool;
 pub mod fanout;
 pub mod health;
 /// AEC 远端参考的输出回环采集（远端扬声器 → far 参考）。**实现按平台分文件**：
@@ -34,6 +36,8 @@ pub mod loopback;
 #[cfg(not(any(windows, target_os = "linux")))]
 #[path = "loopback_other.rs"]
 pub mod loopback;
+/// 输出设备的混音：多列 → 一个设备（逐源对齐后相加）
+pub mod mixer;
 pub mod playback;
 pub mod probe;
 pub mod tone;
@@ -180,21 +184,17 @@ impl AudioManager {
     g.running && g.epoch == expect
   }
 
-  /// 先释放旧会话：Linux 的 ALSA **同一设备不能被打开两次**，旧的还占着，新的
-  /// `default_input_config/output_config` 就会报「读取默认格式失败」（Windows 的 WASAPI
-  /// 共享模式容忍并发打开，所以那边没暴露）。重建/启动一律先停旧、再建新。
-  fn release_session(&self) {
-    let old = self.state.lock().unwrap().session.take();
-    if let Some(mut s) = old {
-      s.stop();
-    }
-  }
-
   /// 启动：按当前计划构建并运行会话。返回逐行问题。
+  ///
+  /// **先建后停**（DESIGN.md §6.5 的差异重启）：设备由 `device_pool` 按引用计数持有，
+  /// 先建才能让「没变的设备」**复用同一条流**（不关不重开 → 其它列的 `started_at` 都不动）。
+  /// 从前必须「先停旧会话再建新会话」是因为 ALSA 排他 —— 现在排他由池的单开 + 引用计数承担；
+  /// 而设备 id 是本仓库自己枚举出来的（同一硬件永远是同一个 id），换了 id 就是换了 PCM，
+  /// 短暂并存也不会撞排他。
   pub fn start(&self) -> Result<Vec<String>, String> {
     let _rebuild = self.rebuild.lock().unwrap();
     let plan = self.plan();
-    self.release_session();
+    let old = self.state.lock().unwrap().session.take();
     let (session, problems) = Session::build(
       self.hub.clone(),
       &plan,
@@ -206,6 +206,10 @@ impl AudioManager {
     g.running = true;
     g.epoch += 1;
     drop(g);
+    // 旧会话在这里才停：池的引用计数只在「真没人用」时才关设备
+    if let Some(mut s) = old {
+      s.stop();
+    }
     self.hub.set_running(true);
     Ok(problems)
   }
@@ -375,8 +379,8 @@ impl AudioManager {
       self.state.lock().unwrap().plan = plan;
       return Ok(vec![]);
     }
-    // 先停旧会话（Linux ALSA 同一设备不能同时打开，见 `release_session`），再建新会话
-    self.release_session();
+    // 先建后停（差异重启）：没变的设备复用同一条流，见 `start` 的说明
+    let old = self.state.lock().unwrap().session.take();
     let (new_session, problems) = Session::build(
       self.hub.clone(),
       &plan,
@@ -386,6 +390,10 @@ impl AudioManager {
     let mut g = self.state.lock().unwrap();
     g.session = Some(new_session);
     g.plan = plan;
+    drop(g);
+    if let Some(mut s) = old {
+      s.stop();
+    }
     Ok(problems)
   }
 
@@ -542,6 +550,7 @@ mod tests {
     };
     Plan {
       columns: vec![ColumnSpec {
+        enabled: true,
         rows: vec![
           row(RowKind::Input, "tone", vec![]),
           row(RowKind::Process, "gain", vec![("gain_db", db)]),

@@ -53,6 +53,10 @@ pub struct DeviceInfo {
   pub selected: bool,
   /// 由 DebugHub::snapshot 按当前活动流推出（枚举时恒为 false）
   pub opened: bool,
+  /// 设备池里这一路的**引用数**（几个逻辑路在用；0 = 池没持有）。见 DESIGN.md §6.5。
+  pub refs: usize,
+  /// 输出设备：这一条混音上的**逐源**状态（谁在出声、谁在丢；输入设备恒空）
+  pub mix_sources: Vec<crate::audio::mixer::SourceStat>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -286,6 +290,8 @@ fn enumerate() -> DeviceList {
       };
       let mut push = |direction: &'static str, native: Probe<NativeFormat>, is_default: bool| {
         devices.push(DeviceInfo {
+          refs: 0,
+          mix_sources: Vec::new(),
           id: id.to_string(),
           name: name.clone(),
           host: host_name.clone(),

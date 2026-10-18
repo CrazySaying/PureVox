@@ -478,6 +478,20 @@ function columnElement(col, ci) {
   const title = document.createElement('span')
   title.textContent = T('列 {n}', { n: ci + 1 })
   head.appendChild(title)
+  // 列头开关：停用这一列（**不是删除**）——行、设备选择、参数全留，只放掉这一列对设备的引用，
+  // 别的列不受影响（设备由池按引用计数持有，见 DESIGN.md §6.5「启用 / 停用」）。
+  const onLabel = document.createElement('label')
+  onLabel.className = 'en'
+  const on = document.createElement('input')
+  on.type = 'checkbox'
+  on.checked = col.enabled !== false
+  on.title = T('停用这一列（保留配置，放掉设备引用）')
+  on.addEventListener('change', () => {
+    col.enabled = on.checked
+    apply()
+  })
+  onLabel.append(on, document.createTextNode(T('启用')))
+  head.appendChild(onLabel)
   // 常驻（仅一列时禁用），避免按钮出现/消失
   const del = document.createElement('button')
   del.type = 'button'

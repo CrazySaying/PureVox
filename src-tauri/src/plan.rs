@@ -53,6 +53,11 @@ fn default_true() -> bool {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ColumnSpec {
   pub rows: Vec<RowSpec>,
+  /// 这一列的**启用开关**（列头那个开关）。停用 ≠ 删除：行、设备选择、参数全部保留，
+  /// 只是这一列不产出、并**放掉它对设备的引用**（见 DESIGN.md §6.5「启用 / 停用」）。
+  /// 旧配置没有这个字段 → 视为启用（`default_true`）。
+  #[serde(default = "default_true")]
+  pub enabled: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -65,6 +70,7 @@ impl Default for Plan {
     // 默认一列：一个空输入行 + 一个空输出行（由界面填设备）
     Plan {
       columns: vec![ColumnSpec {
+        enabled: true,
         rows: vec![
           RowSpec {
             kind: RowKind::Input,

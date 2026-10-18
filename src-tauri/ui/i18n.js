@@ -75,6 +75,8 @@
     下移: 'Move down',
     删除: 'Delete',
     启用: 'Enable',
+    '停用这一列（保留配置，放掉设备引用）':
+      'Disable this column (keeps the config, drops its device references)',
     '列 {n}': 'Column {n}',
     至少保留一列: 'Keep at least one column',
     删除此列: 'Delete this column',

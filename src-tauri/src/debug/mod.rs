@@ -313,6 +313,10 @@ impl DebugHub {
           .streams
           .values()
           .any(|s| s.device_id == d.id && s.direction == d.direction);
+        // 设备池：引用数与逐源状态（DESIGN.md §6.5「必须看得见」）
+        let pool = crate::audio::device_pool::hub().stat(&d.id);
+        d.refs = pool.refs;
+        d.mix_sources = pool.sources;
       }
     }
     let st_ui = st.ui.clone();

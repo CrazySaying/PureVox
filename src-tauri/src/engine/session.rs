@@ -35,7 +35,7 @@ use super::media::{self, MediaCmd, MediaSlot};
 use super::registry::{self, ParamValue, Params};
 use super::stage::{FrameContext, Stage, StageError};
 use crate::audio::fanout::Fanout;
-use crate::audio::{HOP, WorkerHandle, capture, loopback, playback};
+use crate::audio::{HOP, WorkerHandle, capture, loopback};
 use crate::debug::SharedHub;
 use crate::dsp::meter::RateMeter;
 use crate::infer::aec::Aec;
@@ -74,6 +74,16 @@ struct Row {
   /// 输入行（loopback）：行内增益（系统混音偏响，默认 -6 dB）——**热参数**
   /// （`engine/hot.rs`：界面改它只写这个单元格，不重建会话）
   gain: Option<Arc<crate::engine::hot::HotGain>>,
+  /// 本行绑的设备 ID（重启用它按需取回设备租约；输入/输出行才有）
+  device: Option<String>,
+  /// 本行的采集是否**池化**（普通采集行 = 是；AEC 行 / 回环行各自持有采集路径，见 §6.5 待做）
+  pooled_input: bool,
+  /// 本行的输出是否池化（普通输出行 = 是）
+  pooled_output: bool,
+  /// 输入行的设备租约（池持有设备，行只拿这个；停用即放掉 → 引用归零才真关）
+  in_lease: Option<crate::audio::device_pool::InputLease>,
+  /// 输出行的设备租约（内含该设备唯一那条混音的这一路源）
+  out_lease: Option<crate::audio::device_pool::OutputLease>,
   /// AEC 输入行：mic 读端 + far 历史 + 本行模型状态
   aec: Option<AecRow>,
   /// `remote_mic` 输入行：网络入站队列（DESIGN.md §4.1）
@@ -398,6 +408,60 @@ fn take_hop(cons: &mut Consumer<f32>, out: &mut [f32; HOP]) -> (bool, usize) {
   (false, dropped)
 }
 
+/// 输入行的设备租约：启用就按需取回、停用就放掉（**一处实现**，建会话与运行中开关共用）。
+///
+/// 这就是「列/行开关 = 订阅与引用的挂摘」（DESIGN.md §6.5）：停用不删行、保留设备选择，
+/// 只放掉这一份引用；引用归零时池才真关设备（异步真关，`WorkerHandle::stop` 会 join）。
+fn apply_input_lease(r: &mut Row, hub: &SharedHub, idx: usize, ri: usize) {
+  if !r.pooled_input {
+    return;
+  }
+  let Some(dev) = r.device.clone() else {
+    return;
+  };
+  if r.enabled {
+    if r.in_lease.is_none() {
+      match crate::audio::device_pool::hub().acquire_input(hub.clone(), &dev) {
+        Ok(lease) => {
+          r.input = Some(lease.subscribe(&format!("col{idx}row{ri}")));
+          r.in_lease = Some(lease);
+          r.error = None;
+        }
+        Err(e) => r.error = Some(e),
+      }
+    }
+  } else if r.in_lease.is_some() {
+    r.in_lease = None;
+    r.input = None;
+  }
+}
+
+/// 输出行的设备租约（同上；顺带把这一列接进该设备**唯一**那条混音）。
+fn apply_output_lease(r: &mut Row, hub: &SharedHub, idx: usize, ri: usize) {
+  if !r.pooled_output {
+    return;
+  }
+  let Some(dev) = r.device.clone() else {
+    return;
+  };
+  if r.enabled {
+    if r.out_lease.is_none() {
+      match crate::audio::device_pool::hub().acquire_output(hub.clone(), &dev) {
+        Ok(lease) => {
+          r.output = Some(lease.out.clone());
+          r.out_lease = Some(lease);
+          r.error = None;
+        }
+        Err(e) => r.error = Some(e),
+      }
+    }
+  } else if r.out_lease.is_some() {
+    r.out_lease = None;
+    r.output = None;
+  }
+  let _ = (idx, ri);
+}
+
 fn build_column(
   hub: &SharedHub,
   idx: usize,
@@ -409,17 +473,19 @@ fn build_column(
 ) -> ColumnRuntime {
   let mut rows: Vec<Row> = Vec::new();
   let mut captures = Vec::new();
-  let mut playbacks = Vec::new();
+  let playbacks = Vec::new();
   // `remote_mic` 入站是单队列，全会话只允许一行（SPEC 约束）
   let mut remote_mic_used = false;
 
+  // 列头开关：整列停用 = 这一列不产出、也不占设备引用（行级开关照旧各自生效）
+  let column_on = spec.enabled;
   for (ri, r) in spec.rows.iter().enumerate() {
     // 热参数登记口：本行建出来的单元格（增益 / 音量）收进会话，供运行中改值
     let mut sink = crate::engine::hot::HotSink::new();
     let mut row = Row {
       kind: r.kind,
       label: r.ptype.clone(),
-      enabled: r.enabled,
+      enabled: r.enabled && column_on,
       enabled_prev: r.enabled,
       error: None,
       unconfigured: false,
@@ -427,6 +493,11 @@ fn build_column(
       inf_max_ms: 0.0,
       input: None,
       gain: None,
+      device: None,
+      pooled_input: false,
+      pooled_output: false,
+      in_lease: None,
+      out_lease: None,
       aec: None,
       net_input: None,
       ring_dropped: 0,
@@ -619,13 +690,10 @@ fn build_column(
           Err(e) => row.error = Some(e),
           Ok((_, name)) => {
             row.label = name;
-            match capture::spawn(hub.clone(), dev.to_string(), format!("c{idx}r{ri}")) {
-              Ok(cap) => {
-                row.input = Some(cap.fanout.subscribe(&format!("col{idx}row{ri}")));
-                captures.push(cap.handle);
-              }
-              Err(e) => row.error = Some(e),
-            }
+            // 设备由**池**持有（同一设备多列共用一条采集流），行只拿租约（DESIGN.md §6.5）
+            row.device = Some(dev.to_string());
+            row.pooled_input = true;
+            crate::engine::session::apply_input_lease(&mut row, hub, idx, ri);
           }
         },
       },
@@ -658,19 +726,10 @@ fn build_column(
           Err(e) => row.error = Some(e),
           Ok((_, name)) => {
             row.label = name;
-            let fan = Arc::new(Fanout::new(format!("列{}输出", idx + 1)));
-            match playback::spawn(
-              hub.clone(),
-              dev.to_string(),
-              fan.clone(),
-              format!("c{idx}r{ri}"),
-            ) {
-              Ok(h) => {
-                row.output = Some(fan);
-                playbacks.push(h);
-              }
-              Err(e) => row.error = Some(e),
-            }
+            // 输出也由池持有：一个设备**一条**混音，本行只是往里登记一路源（DESIGN.md §6.5）
+            row.device = Some(dev.to_string());
+            row.pooled_output = true;
+            crate::engine::session::apply_output_lease(&mut row, hub, idx, ri);
           }
         },
       },
@@ -691,9 +750,10 @@ fn build_column(
   let (rows2, sum2, stop2) = (rows.clone(), summary.clone(), stop.clone());
   let rec2 = rec.clone();
   let calib2 = calib.clone();
+  let hub3 = hub.clone();
   let join = std::thread::Builder::new()
     .name(format!("column-{}", idx + 1))
-    .spawn(move || run_column(idx, rows2, sum2, stop2, rec2, calib2))
+    .spawn(move || run_column(idx, rows2, sum2, stop2, rec2, calib2, hub3))
     .ok();
 
   ColumnRuntime {
@@ -712,6 +772,7 @@ fn run_column(
   stop: Arc<AtomicBool>,
   rec: Arc<RecorderHub>,
   calib: Arc<CalibHub>,
+  hub: SharedHub,
 ) {
   let ctx = FrameContext::default();
   let mut tmp = [0.0f32; HOP];
@@ -752,6 +813,8 @@ fn run_column(
         }
         match r.kind {
           RowKind::Input => {
+            // 启用/停用：挂摘设备租约（停用即释放引用；重新启用可能失败 → 明确原因）
+            apply_input_lease(r, &hub, idx, ri);
             if let Some(aec) = r.aec.as_mut() {
               // AEC 行：mic hop 与 far 窗口对齐后过模型；far 历史不足则直通 mic
               let (got, dropped) = take_hop(&mut aec.mic, &mut tmp);
@@ -886,6 +949,8 @@ fn run_column(
             }
           }
           RowKind::Output => {
+            // 启用/停用：挂摘设备租约（停用即从混音注销 + 释放引用）
+            apply_output_lease(r, &hub, idx, ri);
             if r.enabled {
               if let Some(f) = r.output.as_ref() {
                 f.push_hop(&acc);

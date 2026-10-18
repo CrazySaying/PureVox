@@ -140,17 +140,22 @@ pub fn spawn(
   }
 }
 
-/// PI 时钟伺服：输入 48k 环水位（ms），输出比例修正量 adj（正 = 消耗更快）。
-struct Servo {
+/// PI 时钟伺服：输入环水位（ms），输出比例修正量 adj（正 = 消耗更快）。
+///
+/// 设定点由调用方给：输出设备那条链挂在 **48k 源环**（`TARGET_MS` = 40 ms），混音里每一路源挂在
+/// **自己的累计器**（约一格）—— 同一条控制律，两处只是被控对象不同（见 `audio/mixer.rs`）。
+pub(super) struct Servo {
+  target_ms: f64,
   ema_ms: f64,
   integral: f64,
-  adj: f64,
+  pub(super) adj: f64,
 }
 
 impl Servo {
-  fn new() -> Self {
+  pub(super) fn new(target_ms: f64) -> Self {
     Servo {
-      ema_ms: TARGET_MS,
+      target_ms,
+      ema_ms: target_ms,
       integral: 0.0,
       adj: 0.0,
     }
@@ -158,13 +163,13 @@ impl Servo {
 
   /// 预热完成 / 重同步后，从设定点重新起算水位（保留积分项 = 已学到的速率差）。
   fn reset_level(&mut self) {
-    self.ema_ms = TARGET_MS;
+    self.ema_ms = self.target_ms;
   }
 
-  fn update(&mut self, level_ms: f64, dt_s: f64) {
+  pub(super) fn update(&mut self, level_ms: f64, dt_s: f64) {
     let a = (dt_s / EMA_TAU_S).min(1.0);
     self.ema_ms += a * (level_ms - self.ema_ms);
-    let e = self.ema_ms - TARGET_MS;
+    let e = self.ema_ms - self.target_ms;
     self.integral += e * dt_s;
     // 抗饱和：积分项单独不超过限幅
     let i_lim = ADJ_LIMIT / KI;
@@ -235,7 +240,7 @@ fn run(
   let mut drop_rate = RateMeter::new();
   let mut err_rate = RateMeter::new();
   let mut stall = StallWatch::new();
-  let mut servo = Servo::new();
+  let mut servo = Servo::new(TARGET_MS);
   let mut prewarm = true;
   let mut consumed: u64 = 0;
   let mut hops: u64 = 0;
