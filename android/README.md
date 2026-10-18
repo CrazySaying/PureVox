@@ -133,10 +133,17 @@ app/src/main/jniLibs/arm64-v8a/libpvopus.so    libopus 1.5.2 + 转发层，预�
 **手动**触发（不自动检查：一打开就弹更新对低频工具是打扰），数据源就是本仓库的
 GitHub Releases，**与电脑端更新检查同一份数据**。
 
-* **比较依据是 tag 的完整时间戳**映射出的 `yyMMddHHmm`（`v2026.10.17.2359` → `2610172359`）
-  与安装包 `versionCode` 比整数 —— 与 `tools/automation/version.py` 同一套算法。显示版本
-  `yy.M.d` 同日会重复，比它没用。
-* **开发构建（`versionCode = 1`）不下结论**，只报「开发构建」。
+* **比较依据是 tag 的完整时间戳**映射出的 `yyMMddHHmm ÷ 10`
+  （`v2026.10.17.2359` → `261017235`，10 分钟粒度）与安装包 `versionCode` 比整数 ——
+  与 `tools/automation/version.py` 同一套算法。显示版本 `yy.M.d` 同日会重复，比它没用。
+* **`÷ 10` 不能省**：`versionCode` 是 **Int32**（上限 2147483647），十位数的 `2610172359`
+  装不进去。溢出的表现是**整条链静默失效** —— Gradle 侧 `toIntOrNull()` 返回 null 后
+  回退成 `versionCode = 1`，应用侧 `stampToCode` 同样返回 null 报「没有可用的 APK 资产」。
+  2026-10-17 的 CI 包就是这么来的（实测 `versionName=26.10.17` / `versionCode=1`）。
+  现在两侧都按 ÷10 算，且 `build.gradle.kts` 里**传了 `-PpvVersionCode` 就必须解析成功**，
+  否则构建当场失败（不再静默回退）。
+* **开发构建（`versionCode = 1`）不下结论**，只报「开发构建」。注意 2026-10-17 及更早的 CI
+  包也是 1（上面的溢出），那批包会一直报「开发构建」，只能手动装下一版。
 * 产物按 **`.apk` 后缀**认领（不看版本号）；下载落应用私有外部目录的 `update/`，经
   `FileProvider`（`res/xml/file_paths.xml`）交系统安装器，需 `REQUEST_INSTALL_PACKAGES`。
 * 三步状态机 **检查 → 下载 → 安装**，界面按状态卡按钮，**不许跳步**。
@@ -173,9 +180,10 @@ cd android
 `.so`，见上）。`gradle/wrapper/gradle-wrapper.jar` 已入库，不要替换；
 `gradle-wrapper.properties` 钉的是 Gradle 8.9（AGP 8.7.3 的最低要求）。
 
-CI 打包时会传 `-PpvVersion=<年.月.日>` 与 `-PpvVersionCode=<yyMMddHHmm>`（见
+CI 打包时会传 `-PpvVersion=<年.月.日>` 与 `-PpvVersionCode=<ACODE>`（见
 `tools/automation/version.py`）：**应用内更新靠 `versionCode` 判新旧**，本机不带参数就退回
-`versionCode = 1` + `versionName = "1.0"`（于是应用内更新会报「开发构建」）。
+`versionCode = 1` + `versionName = "1.0"`（于是应用内更新会报「开发构建」）。传了参数却解析
+不出来（非整数、越界）**构建直接失败** —— 版本号错了要等用户点「检查更新」才暴露，宁可红。
 
 ### release 签名
 

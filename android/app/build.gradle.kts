@@ -73,6 +73,25 @@ if (!pvHasSigning) {
     )
 }
 
+// ── versionCode ──────────────────────────────────────────────────────────────
+// **传了参数就必须解析成功**。这里曾经是 `(findProperty("pvVersionCode") as String?)
+// ?.toIntOrNull() ?: 1`，而 `ACODE` 当时是十位数的 `yyMMddHHmm`（2610172359 > Int32 上限
+// 2147483647）—— 溢出成 null、悄悄回退成 1，CI 全绿，用户装上的 APK 却永远报「开发构建
+// （没有版本时间戳），无法比较新旧」（2026-10-17 实测）。版本号错了不会自己浮出来，要等
+// 用户点「检查更新」才发现，所以宁可构建当场失败。不传参数 = 本机构建，才退回 1。
+val PV_VERSION_CODE_MAX = 2_100_000_000 // Play 的硬限值，也确保 Int32 装得下
+
+val pvVersionCode: Int = (findProperty("pvVersionCode") as String?)?.let { raw ->
+    val n = raw.trim().toIntOrNull()
+    if (n == null || n !in 1..PV_VERSION_CODE_MAX) {
+        throw GradleException(
+            "pvVersionCode 必须是 1..$PV_VERSION_CODE_MAX 的整数，收到 '$raw'。" +
+                "（CI 传的是 tools/automation/version.py 的 ACODE，见该文件注释）"
+        )
+    }
+    n
+} ?: 1
+
 android {
     namespace = "com.purevox.mic"
     compileSdk = 34
@@ -81,10 +100,10 @@ android {
         applicationId = "com.purevox.mic"
         minSdk = 24
         targetSdk = 34
-        // versionCode 必须**单调递增**才能让应用内更新检查判出新旧，故取 `yyMMddHHmm`
-        // （如 2610081430，int32 内）。由 CI 传入（`-PpvVersionCode=`，见
-        // tools/automation/version.py 的 ACODE）；本机默认 1。
-        versionCode = ((findProperty("pvVersionCode") as String?)?.toIntOrNull() ?: 1)
+        // versionCode 必须**单调递增**才能让应用内更新检查判出新旧，故取 `yyMMddHHmm ÷ 10`
+        // （如 261008143，10 分钟粒度、Int32 内）。由 CI 传入（`-PpvVersionCode=`，见
+        // tools/automation/version.py 的 ACODE）；本机不带参数 → 1。解析在 android 块上方。
+        versionCode = pvVersionCode
         // 版本名 = 年.月.日，由 CI 传入（`-PpvVersion=`，见 tools/automation/version.py）；本机默认 1.0。
         versionName = (findProperty("pvVersion") as String?) ?: "1.0"
     }

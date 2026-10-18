@@ -334,7 +334,8 @@ wasm 只要浏览器有 `WebAssembly` 就行。帧长按引擎 hop 配（`channe
   `/S /UPDATE /NS /R`，且**必须先退进程再装**（安装器会拦下正在运行的 exe）；
   Linux 仅 AppImage 能自替换；其余明确「不支持 + 给出 release 页面」，**不静默失败**。
 - **Android 侧的应用内更新**（`android/.../update/`）是**同一数据源、同一判定**的另一端实现：
-  手动触发，比较 tag 时间戳映射出的 `yyMMddHHmm` 与安装包 `versionCode`，产物按 `.apk` 匹配，
+  手动触发，比较 tag 时间戳映射出的 `yyMMddHHmm ÷ 10` 与安装包 `versionCode`
+  （÷10 是为了塞进 Int32，见 AGENTS.md §1.3），产物按 `.apk` 匹配，
   下载后经 `FileProvider` 交系统安装器（见 AGENTS.md §1.3）。
 - 状态同时进调试接口 `/debug` 的 `update` 段（与界面同源，AGENTS.md §1.2）。
 
@@ -465,7 +466,7 @@ pub fn resolve(key: &str, kind: ModelKind) -> Option<&'static ModelDesc>;
 | 媒体 | ✅ 已实现（后端 + 界面，2026-10-12）：`soundpad` / `player` 处理行、媒体库导入（symphonia）、每音效热键、MediaHub 控制 | §4 |
 | **网络（手机 ⇄ 电脑）** | ✅ 已实现：`remote_mic` 输入行 + `remote_speaker` 输出行 + Opus（运行时加载预编译 `opus.dll`）+ `text` 打字 / `key` 全尺寸键盘（默认关闭，界面开关） | §4 / §4.1 |
 | **更新检查 / 更新** | ✅ 已实现（2026-10-12）：GitHub Releases 查 → 下载 → 静默安装（Windows NSIS / Linux AppImage 自替换），顶栏「更新」面板 | §4.2 |
-| **版本号 年.月.日** | ✅ 已实现（2026-10-12）：`yy.m.d` 显示、tag 全时间戳比较；Android `versionCode` = `yyMMddHHmm` 单调递增 | — |
+| **版本号 年.月.日** | ✅ 已实现（2026-10-12）：`yy.m.d` 显示、tag 全时间戳比较；Android `versionCode` = `yyMMddHHmm ÷ 10` 单调递增（十位数超 Int32，见 AGENTS §1.3） | — |
 
 **实施顺序**：
 1. ✅ Stage / Pipeline / 注册表骨架 + 现有降噪包成 Stage。

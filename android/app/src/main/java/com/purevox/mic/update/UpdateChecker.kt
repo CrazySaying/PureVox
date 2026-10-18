@@ -32,8 +32,9 @@ import java.util.concurrent.TimeUnit
  *
  * 判定依据是 **tag 的完整时间戳**，不是显示版本号：显示版本 `yy.M.d` 同日会重复，
  * 而 tag `v<yyyy.MM.dd.HHmm>` 按时间全序。本机版本则是安装包的 `versionCode`
- * （`yyMMddHHmm`，见 `tools/automation/version.py` 的 `ACODE`）—— 两者同源，直接比整数
+ * （`yyMMddHHmm ÷ 10`，见 `tools/automation/version.py` 的 `ACODE`）—— 两者同源，直接比整数
  * 大小即可，且 **versionCode 单调递增**正是为此设计的（`build.gradle.kts` 注释）。
+ * **÷10 必须两侧一致**（见 `stampToCode`）：versionCode 是 Int32，十位数值装不进去。
  *
  * 产物**按文件名后缀匹配**（`*.apk`），不看版本号（同 `update/install_*.rs` 的思路）：
  * `release.yml` 会统一重命名产物，后缀因此稳定。
@@ -47,8 +48,16 @@ object UpdateChecker {
     private const val REPO = "a2heng/PureVox"
     private const val API = "https://api.github.com/repos/$REPO/releases/latest"
 
-    /** 没有版本时间戳的构建（本机 `assembleRelease` 默认 versionCode=1）。 */
+    /**
+     * 没有版本时间戳的构建（本机 `assembleRelease` 默认 versionCode=1）。
+     *
+     * 注意 **2026-10-17 及更早的 CI 包也叫 1**（当时的 `ACODE` 十位数溢出被静默丢成 1）：
+     * 那些包会一直报「开发构建」，只能手动装下一版 —— 修好之后的包 versionCode 正常。
+     */
     private const val DEV_VERSION_CODE = 1L
+
+    /** versionCode 上限（Play 的硬限值，也确保 Int32 装得下；与 `version.py` 同值）。 */
+    private const val MAX_VERSION_CODE = 2_100_000_000L
 
     private val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
@@ -98,10 +107,15 @@ object UpdateChecker {
     }
 
     /**
-     * `v2026.10.08.1430` → `2610081430`（= `ACODE`）。格式不对返回 `null`。
+     * `v2026.10.08.1430` → `261008143`（= `ACODE`）。格式不对 / 越界返回 `null`。
      *
-     * **必须补零再拼**：`version.py` 生成的 ACODE 是定长十位，`26` + `10` + `08` + `1430`；
-     * 若按整数去前导零拼会得到 `26108 1430` 这种位数不定的串，与安装包的定长值不可比。
+     * **必须补零再拼**：先在**定长十位**上拼出 `yyMMddHHmm`（`26` + `10` + `08` + `1430`），
+     * 再整除 10；若按整数去前导零拼会得到 `26108 1430` 这种位数不定的串，与安装包的值不可比。
+     *
+     * **÷10 不能省**：十位的 `2610172359`（2.6e9）超过 versionCode 的 Int32 上限
+     * 2147483647 —— 溢出成 `null` 的表现是**整条链静默失效**：Gradle 侧退回 `versionCode=1`，
+     * 应用侧认不出 release（报「没有可用的 APK 资产」），2026-10-17 实测踩到。÷10 后是
+     * 10 分钟粒度、单调、上限 991231235，与 `version.py` 逐字一致。
      */
     fun stampToCode(tag: String): Int? {
         val t = tag.trim().removePrefix("v")
@@ -112,9 +126,11 @@ object UpdateChecker {
         val d = parts[2].toIntOrNull() ?: return null
         val hm = parts[3].toIntOrNull() ?: return null
         if (mo !in 1..12 || d !in 1..31 || hm !in 0..2359) return null
+        if (hm % 100 > 59) return null // 2359 合法，2360 不合法
         val yy = y % 100
-        val code = "%02d%02d%02d%04d".format(yy, mo, d, hm)
-        return code.toIntOrNull()
+        val code = "%02d%02d%02d%04d".format(yy, mo, d, hm).toLong() / 10L
+        if (code !in 1..MAX_VERSION_CODE) return null
+        return code.toInt()
     }
 
     /** `v2026.10.08.1430` → `26.10.8`（显示版本，去前导零，与 `version.py` 的 VERSION 同构）。 */

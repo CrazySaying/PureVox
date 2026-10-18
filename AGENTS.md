@@ -182,7 +182,11 @@ release 构建同样保留（不允许用编译开关剔除）。
     另有「忽略电池优化」入口（`ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`）。
   - **应用内更新**（`update/{UpdateChecker,UpdateDownloader,UpdateInstaller}.kt`）：
     **手动**检查（不自动），数据源与本仓库 GitHub Releases 一致；比较依据是 tag 的完整时间戳
-    映射出的 `yyMMddHHmm` 与安装包 `versionCode` 比整数（开发构建 `versionCode=1` → 不下结论）；
+    映射出的 `yyMMddHHmm ÷ 10` 与安装包 `versionCode` 比整数（开发构建 `versionCode=1` → 不下结论）；
+    **÷10 不能省**：十位数 `2610172359` 超过 versionCode 的 Int32 上限 2147483647，
+    溢出会被 Gradle 侧静默丢成 `1` —— 表现是 APK 永远报「开发构建」、应用侧也认不出 release
+    （2026-10-17 实测踩到，`version.py` / `build.gradle.kts` / `UpdateChecker.stampToCode`
+    三处必须同算法，`check.py -Gate version` 与 `build` 各有断言）；
     产物按 `.apk` 后缀匹配；下载落应用私有外部目录，经 `FileProvider`（`res/xml/file_paths.xml`）
     交系统安装器，需 `REQUEST_INSTALL_PACKAGES`。
   - **长文本 / 退格**：输入框是 `PvEditText`（包一层 `InputConnectionWrapper`）——「打字同步」
