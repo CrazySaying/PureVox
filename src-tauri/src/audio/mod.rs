@@ -403,12 +403,14 @@ impl AudioManager {
 mod tests {
   use super::*;
 
-  /// 测试用的管理器：**自给自足的计划**。
+  /// 测试用的管理器：**自给自足的计划**，而且**绝不碰用户真实配置**。
   ///
-  /// `AudioManager::new` 读的是用户真实的 `~/.purevox/session.json`，直接用会让测试
-  /// 依赖本机配置（本机若有 AEC 行 / 选了真实设备，断言就会飘）。这里一律换成
-  /// `Plan::default()`：一条输入 + 一条输出，都不指定设备。
+  /// `AudioManager::new` 读的是真实 `~/.purevox/session.json`，直接用会让测试依赖本机
+  /// 配置（本机若有 AEC 行 / 选了真实设备，断言就会飘）；更糟的是这里的
+  /// `persist_plan` 会**写回**那个真实文件 —— 一次 `cargo test` 就把开发者的会话计划
+  /// 覆盖成默认计划（2026-10-18 实际踩到）。所以先把 `config_dir` 指到临时目录。
   fn mgr() -> AudioManager {
+    crate::config::use_test_dir();
     let m = AudioManager::new(crate::debug::DebugHub::new());
     m.persist_plan(Plan::default()).expect("写入测试计划");
     m
@@ -464,10 +466,8 @@ mod tests {
   #[test]
   fn calibrate_without_aec_row_reports_row_problem_not_running() {
     let m = mgr();
-    // **必须自给自足的计划**：`AudioManager::new` 读的是用户真实的 `~/.purevox/session.json`，
-    // 直接拿来断言会被本机配置带偏（上面就踩过：本机若有 AEC 行，这个测试会意外通过）。
-    // `Plan::default()` = 一条输入 + 一条输出，没有 AEC 行。
-    m.persist_plan(Plan::default()).expect("写入测试计划");
+    // 计划由 `mgr()` 置成 `Plan::default()`（一条输入 + 一条输出、没有 AEC 行），
+    // 而配置目录已被 `use_test_dir()` 指到临时目录 —— 测试**不读也不写**用户真实配置。
     let e = m.calibrate_aec_delay().expect_err("没有 AEC 行应当报错");
     assert!(e.contains("AEC"), "应报缺 AEC 行，实际：{e}");
     assert!(!m.is_running(), "前置检查失败不该留下运行中的会话");

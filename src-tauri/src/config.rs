@@ -29,7 +29,40 @@ fn home_dir() -> Result<PathBuf, String> {
 }
 
 pub fn config_dir() -> Result<PathBuf, String> {
+  // 单测**绝不许**碰用户真实的 `~/.purevox/`：`plan::*` 的集成测试会 `persist_plan`，
+  // 一次 `cargo test` 就能把开发者的会话计划覆盖成默认计划（2026-10-18 实际踩到）。
+  #[cfg(test)]
+  if let Some(d) = test_dir::get() {
+    return Ok(d.clone());
+  }
   Ok(home_dir()?.join(".purevox"))
+}
+
+/// 单测用的配置目录覆盖（只在 `cfg(test)` 下存在，测试里调一次 [`use_test_dir`] 即可）。
+#[cfg(test)]
+mod test_dir {
+  use std::path::PathBuf;
+  use std::sync::OnceLock;
+
+  static DIR: OnceLock<PathBuf> = OnceLock::new();
+
+  pub fn get() -> Option<&'static PathBuf> {
+    DIR.get()
+  }
+
+  pub fn init() {
+    DIR.get_or_init(|| {
+      let d = std::env::temp_dir().join("purevox-test-config");
+      let _ = std::fs::create_dir_all(&d);
+      d
+    });
+  }
+}
+
+/// 把配置目录指到临时目录（**测试专用**）：任何会落盘的测试先调它。
+#[cfg(test)]
+pub fn use_test_dir() {
+  test_dir::init();
 }
 
 pub fn session_path() -> Result<PathBuf, String> {
