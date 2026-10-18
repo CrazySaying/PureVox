@@ -69,7 +69,9 @@
   `tauri-utils` 随之到 alpha.4）；CLI 钉 `TCLI_VER=3.0.0-alpha.5`，同时把 `CACHE_GEN` 提到 **2**
   （缓存键里含着 `TCLI_VER` 与代数，旧桶整体作废、必须重暖）。各 crate 版本号**不同步**，
   以 crates.io 实际发布为准（见 §2 版本锚点）。改了 `Cargo.toml` 之后，`src-tauri/Cargo.lock`
-  由下一次 `cargo build` / `cargo update` 自动重新解析并生成，别手改锁文件。
+  由下一次 `cargo build` / `cargo update` 自动重新解析并生成，别手改锁文件（本条升级已用
+  `cargo update -p tauri --precise 3.0.0-alpha.5` 落地并提交：只动 tauri 族 + `swift-rs`，
+  其余依赖原地不动，共 25 增 17 删）。
 
 > 信息收集日期：2026-10-07。Tauri 3 处于 alpha，版本号、API 和文档都可能变化，
 > 引用任何结论前先核对下文「版本锚点」是否仍是最新。
