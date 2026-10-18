@@ -337,6 +337,14 @@ wasm 只要浏览器有 `WebAssembly` 就行。帧长按引擎 hop 配（`channe
   → `failed` + 原因。Windows 只有 `-setup.exe`（NSIS；不出 MSI，见
   `src-tauri/tauri.windows.conf.json` 钉死 `bundle.targets=["nsis"]`），Android `.apk`。
   CI 统一重命名产物，后缀因此稳定。
+- **下载不许有总超时，断了要能接着下**：安装包 50~140 MB，任何「整条请求」的时限都会在
+  中途把响应体掐断；而 reqwest 把「body 被掐断」归到 `Kind::Decode`，报出来是
+  `error decoding response body` —— 一句和真实原因（太大/太慢）无关的话（2026-10-18 实测：
+  直连 GitHub 资产只有 ~41 KB/s、走代理 ~1.9 MB/s，`received` 停在 735703/76346174）。
+  所以下载与检查**用两个客户端**：检查 15 s 总超时（不能拖住界面），下载**连接 15 s +
+  空闲 `IDLE_TIMEOUT_S`（每收到一块就重置）+ 不设总超时**；并且**断点续传 + 重试**
+  （`<产物名>.part` 就是续传点，`Range` 续，服务器不理 `Range` 就清空重来；
+  `received` 是续传后的总进度，失败原因带「已收 / 总大小」）。**别把两者合成一个客户端**。
 - **安装是平台实现**（`update/install_<platform>.rs`）：Windows 用 NSIS 静默
   `/S /UPDATE /NS /R`，且**必须先退进程再装**（安装器会拦下正在运行的 exe）；
   Linux 三种包都支持 —— AppImage 覆盖自身（临时名 + `rename`，跑着的进程用挂载副本不受影响），

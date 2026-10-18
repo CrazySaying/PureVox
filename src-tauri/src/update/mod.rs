@@ -351,14 +351,94 @@ fn decide(mine_stamp: &str, latest_stamp: &str) -> Phase {
   }
 }
 
-/// 共享 HTTP 客户端（超时收紧到 15 s：更新检查不能拖住界面）。
+/// 客户端 UA（GitHub 要求带 UA，两个客户端共用一份）。
+const UA: &str = "PureVox-Desktop";
+/// 下载时**空闲**多久算卡死（ms）：每收到一块就重置，不是总时长。
+const IDLE_TIMEOUT_S: u64 = 30;
+/// 下载最多试几次（**每次从上次断的地方续**，所以多试几次几乎总能下完）。
+const DOWNLOAD_ATTEMPTS: u32 = 6;
+
+/// 检查更新用的 HTTP 客户端：**整条请求 15 s 封顶**（检查不能拖住界面）。
 fn http_client() -> Result<reqwest::Client, String> {
   reqwest::Client::builder()
-    .user_agent("PureVox-Desktop")
+    .user_agent(UA)
     .timeout(std::time::Duration::from_secs(15))
     .connect_timeout(std::time::Duration::from_secs(10))
     .build()
     .map_err(|e| format!("创建 HTTP 客户端失败：{e}"))
+}
+
+/// 下载安装包用的 HTTP 客户端：**不设总超时**。
+///
+/// 这条是 2026-10-18 那次「下载中断：error decoding response body」的根因：以前下载
+/// 和检查共用一个 `timeout(15s)` 的客户端，而 `timeout` 是**整条请求**（含响应体）的
+/// 时限 —— 安装包 50~140 MB，实测直连 GitHub 资产只有 ~41 KB/s（72.8 MB 要 30 min）、
+/// 走代理 ~1.9 MB/s（也要约 40 s），**任何超过 15 s 的下载都会被拦腰掐断**；而 reqwest
+/// 把「body 被掐断」归到 `Kind::Decode`，Display 正好是 `error decoding response body`
+/// —— 一句既看不懂、也和真实原因（太大/太慢）无关的报错（reqwest 自带单测
+/// `decode_body_timeout_is_timeout` 写的就是这条路径）。所以：
+/// - 连接 15 s（连不上要快失败）；
+/// - **空闲 30 s**（`read_timeout` 是「每收到一块就重置」，慢而下得动就不算超时）。
+fn download_client() -> Result<reqwest::Client, String> {
+  reqwest::Client::builder()
+    .user_agent(UA)
+    .connect_timeout(std::time::Duration::from_secs(15))
+    .read_timeout(std::time::Duration::from_secs(IDLE_TIMEOUT_S))
+    .build()
+    .map_err(|e| format!("创建下载客户端失败：{e}"))
+}
+
+/// 下载过程中的错误 → 给人看的原因（超时与真断流分开说，数字都带上）。
+fn describe_download_error(e: &reqwest::Error) -> String {
+  if e.is_timeout() {
+    format!("下载超时（{IDLE_TIMEOUT_S} s 没收到数据，连接在走但太慢或卡住）：{e}")
+  } else {
+    format!("下载中断：{e}")
+  }
+}
+
+/// 一次下载尝试：把响应体**追加**写进 `file`，`total` = 已落盘的字节数（本函数内推进）。
+///
+/// - `total > 0` 时带 `Range: bytes=<total>-` 续传；服务器不理 `Range`（回 200 整包）时
+///   **清空文件重来**，否则会把整包接在旧进度后面（文件翻倍）。
+/// - 响应体流到一半断掉 → 返回 `Err`，**已经落盘的字节保留**（下次接着下）。
+async fn fetch_into(
+  client: &reqwest::Client,
+  url: &str,
+  file: &mut std::fs::File,
+  total: &mut u64,
+  mut on_progress: impl FnMut(u64),
+) -> Result<(), String> {
+  use futures_util::StreamExt;
+  use std::io::{Seek, Write};
+
+  let mut req = client.get(url);
+  if *total > 0 {
+    req = req.header(reqwest::header::RANGE, format!("bytes={}-", *total));
+  }
+  let resp = req
+    .send()
+    .await
+    .and_then(|r| r.error_for_status())
+    .map_err(|e| describe_download_error(&e))?;
+  // 服务器没按 Range 回（200 = 整包）：从零来，别把整包接在旧进度后面
+  if *total > 0 && resp.status() == reqwest::StatusCode::OK {
+    file
+      .set_len(0)
+      .and_then(|_| file.rewind())
+      .map_err(|e| format!("重置临时文件失败：{e}"))?;
+    *total = 0;
+  }
+  let mut stream = resp.bytes_stream();
+  while let Some(chunk) = stream.next().await {
+    let chunk = chunk.map_err(|e| describe_download_error(&e))?;
+    file
+      .write_all(&chunk)
+      .map_err(|e| format!("写文件失败：{e}"))?;
+    *total += chunk.len() as u64;
+    on_progress(*total);
+  }
+  Ok(())
 }
 
 /// 下载匹配的安装包到 `~/.purevox/update/`，带进度写回全局状态。
@@ -375,8 +455,9 @@ pub async fn download() -> Result<Status, String> {
     (s.asset_name.clone(), s.asset_url(), s.asset_size)
   };
   let dest = download_dir()?.join(&name);
-  // `.part` 临时名：下载中断不留半个文件冒充完成品
-  let tmp = dest.with_extension("part");
+  // `.part` 临时名：下载中断不留半个文件冒充完成品；**带完整产物名**（不是换扩展名 ——
+  // `with_extension` 会让 `.deb` 与 `.AppImage` 撞成同一个临时名，续传会串味）。
+  let tmp = dest.with_file_name(format!("{name}.part"));
 
   with(|s| {
     s.phase = Phase::Downloading;
@@ -385,59 +466,76 @@ pub async fn download() -> Result<Status, String> {
     s.saved_path.clear();
   });
 
-  let client = match http_client() {
+  let client = match download_client() {
     Ok(c) => c,
     Err(e) => {
       fail(e.clone());
       return Err(e);
     }
   };
-  let resp = match client.get(&url).send().await {
-    Ok(r) => match r.error_for_status() {
-      Ok(r) => r,
+  // 断点续传：`.part` 可能是上一次（中断/超时）留下的进度，接着下
+  let mut total: u64 = std::fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0);
+  if size > 0 && total > size {
+    // 比目标还大 = 上一个版本的残留（产物名带版本号，正常情况下不会撞）
+    total = 0;
+    let _ = std::fs::remove_file(&tmp);
+  }
+  with(|s| s.received = total);
+
+  use std::io::{Seek, Write};
+  let mut last_err = String::new();
+  for attempt in 1..=DOWNLOAD_ATTEMPTS {
+    let mut file = match std::fs::OpenOptions::new()
+      .create(true)
+      .write(true)
+      .truncate(false)
+      .open(&tmp)
+    {
+      Ok(f) => f,
       Err(e) => {
-        let msg = format!("下载失败：{e}");
-        fail(msg.clone());
-        return Err(msg);
-      }
-    },
-    Err(e) => {
-      let msg = format!("下载失败：{e}");
-      fail(msg.clone());
-      return Err(msg);
-    }
-  };
-  let mut file = match std::fs::File::create(&tmp) {
-    Ok(f) => f,
-    Err(e) => {
-      let msg = format!("写文件失败：{e}");
-      fail(msg.clone());
-      return Err(msg);
-    }
-  };
-  use futures_util::StreamExt;
-  use std::io::Write;
-  let mut stream = resp.bytes_stream();
-  while let Some(chunk) = stream.next().await {
-    let chunk = match chunk {
-      Ok(c) => c,
-      Err(e) => {
-        let msg = format!("下载中断：{e}");
-        let _ = std::fs::remove_file(&tmp);
+        let msg = format!("写文件失败：{e}");
         fail(msg.clone());
         return Err(msg);
       }
     };
-    if let Err(e) = file.write_all(&chunk) {
-      let msg = format!("写文件失败：{e}");
-      let _ = std::fs::remove_file(&tmp);
+    if let Err(e) = file.seek(std::io::SeekFrom::Start(total)) {
+      let msg = format!("定位临时文件失败：{e}");
       fail(msg.clone());
       return Err(msg);
     }
-    let n = chunk.len() as u64;
-    with(|s| s.received += n);
+    let res = fetch_into(&client, &url, &mut file, &mut total, |n| {
+      with(|s| s.received = n);
+    })
+    .await;
+    let _ = file.flush();
+    drop(file);
+    match res {
+      Ok(()) => {}
+      Err(e) => last_err = e,
+    }
+    // 下完了（有已知大小就对齐大小，否则以「流正常结束」为准）
+    if total > 0 && (size == 0 || total >= size) {
+      break;
+    }
+    if attempt < DOWNLOAD_ATTEMPTS {
+      // 退避：给网络一个喘息，然后把剩下的部分续上（不重头来）
+      tokio::time::sleep(std::time::Duration::from_secs(1 << (attempt - 1).min(3))).await;
+    }
   }
-  drop(file);
+  if size > 0 && total != size {
+    let msg = format!(
+      "下载不完整（{} / {} 字节）：{}",
+      total,
+      size,
+      if last_err.is_empty() {
+        "连接反复中断".to_string()
+      } else {
+        last_err.clone()
+      }
+    );
+    fail(msg.clone());
+    return Err(msg);
+  }
   if let Err(e) = std::fs::rename(&tmp, &dest) {
     let _ = std::fs::remove_file(&tmp);
     let msg = format!("保存安装包失败：{e}");
@@ -890,5 +988,238 @@ mod tests {
       pick_asset_with(&assets, &refs).is_some(),
       "pick_asset_with 对这批真实产物名一个都挑不出来"
     );
+  }
+
+  // ── 下载：断点续传 / 空闲超时（2026-10-18 的「error decoding response body」）──
+  //
+  // 那条报错的根因是「下载共用了检查更新的 15 s **总**超时」，不是网络本身：
+  // 50~140 MB 的安装包在任何慢链路上都下不完，body 被掐断后 reqwest 把它报成
+  // `Kind::Decode`。修法两条 —— 下载不许有总超时（只留空闲超时）、断了能接着下。
+  // 下面这组测试对着**一个真的最小 HTTP 服务器**跑 `fetch_into`：
+  // 断流、服务器不理 `Range`、卡住三种真实情况各钉一条。
+
+  /// 服务器对一次请求的动作。
+  #[derive(Clone, Copy)]
+  enum Act {
+    /// 200 整包（不管客户端有没有带 `Range` —— 模拟不支持续传的服务器）
+    Full,
+    /// 206：从客户端的 `Range` 起点发到底
+    From,
+    /// 200 声明全长，但从 `from` 起只发 `cnt` 字节就**断开**（= 真实的中断/被掐）
+    CutAt(usize),
+    /// 发 `n` 字节后**卡住不关连接**（考客户端自己的空闲超时）
+    StallAfter(usize),
+  }
+
+  /// 起一个最小 HTTP/1.1 服务器（只认 GET、只回一个文件），返回 (url, 收到的 Range 头列表)。
+  /// `acts` 按请求次序取，用完就重复最后一个。
+  async fn serve(
+    payload: Vec<u8>,
+    acts: Vec<Act>,
+  ) -> (
+    String,
+    std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>,
+  ) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    let l = TcpListener::bind("127.0.0.1:0")
+      .await
+      .expect("监听测试端口");
+    let port = l.local_addr().unwrap().port();
+    let seen: std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>> =
+      std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen2 = seen.clone();
+    let payload = std::sync::Arc::new(payload);
+    tokio::spawn(async move {
+      let mut n = 0usize;
+      while let Ok((mut sock, _)) = l.accept().await {
+        // 读请求头，抓 Range
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 512];
+        let mut range = None;
+        loop {
+          match sock.read(&mut tmp).await {
+            Ok(0) | Err(_) => break,
+            Ok(k) => buf.extend_from_slice(&tmp[..k]),
+          }
+          if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&buf).to_lowercase();
+            range = head
+              .lines()
+              .find_map(|l| l.strip_prefix("range:").map(|v| v.trim().to_string()));
+            break;
+          }
+        }
+        seen2.lock().unwrap().push(range.clone());
+        let from: usize = range
+          .as_deref()
+          .and_then(|r| r.strip_prefix("bytes="))
+          .and_then(|r| r.split('-').next())
+          .and_then(|s| s.parse().ok())
+          .unwrap_or(0);
+        let act = acts
+          .get(n)
+          .copied()
+          .unwrap_or(*acts.last().expect("至少一个动作"));
+        n += 1;
+        let plen = payload.len();
+        let start = from.min(plen);
+        let (code, declared, body, stall) = match act {
+          Act::Full => ("200 OK", plen, payload.to_vec(), false),
+          Act::From => (
+            "206 Partial Content",
+            plen - start,
+            payload[start..].to_vec(),
+            false,
+          ),
+          Act::CutAt(cnt) => {
+            let end = (start + cnt).min(plen);
+            ("200 OK", plen, payload[start..end].to_vec(), false) // 声明全长、只发一段、然后断
+          }
+          Act::StallAfter(cnt) => {
+            let end = (start + cnt).min(plen);
+            ("200 OK", plen, payload[start..end].to_vec(), true)
+          }
+        };
+        let head =
+          format!("HTTP/1.1 {code}\r\nContent-Length: {declared}\r\nConnection: close\r\n\r\n");
+        let _ = sock.write_all(head.as_bytes()).await;
+        let _ = sock.write_all(&body).await;
+        let _ = sock.flush().await;
+        if stall {
+          tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        }
+        let _ = sock.shutdown().await;
+      }
+    });
+    (format!("http://127.0.0.1:{port}/a.bin"), seen)
+  }
+
+  fn payload_of(n: usize) -> Vec<u8> {
+    (0..n).map(|i| (i % 251) as u8).collect()
+  }
+
+  /// 临时文件路径（每个测试一份，带进程号，互不打扰）。
+  fn tmp_file(tag: &str) -> std::path::PathBuf {
+    let d = std::env::temp_dir().join(format!("purevox-update-test-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&d);
+    d.join(format!("{tag}.part"))
+  }
+
+  /// 断流之后**接着下**：整包必须逐字节正确（不重不漏），而且第二次请求真的带了 `Range`。
+  #[tokio::test]
+  async fn download_resumes_after_interruption() {
+    use std::io::{Seek, SeekFrom, Write};
+    let payload = payload_of(4096);
+    let (url, seen) = serve(payload.clone(), vec![Act::CutAt(1000), Act::From]).await;
+    let path = tmp_file("resume");
+    let _ = std::fs::remove_file(&path);
+    let client = download_client().expect("建客户端");
+    let mut total = 0u64;
+    let mut last = String::new();
+    for _ in 0..3 {
+      let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .expect("打开临时文件");
+      f.seek(SeekFrom::Start(total)).expect("定位到断点");
+      match fetch_into(&client, &url, &mut f, &mut total, |_| {}).await {
+        Ok(()) => {}
+        Err(e) => last = e,
+      }
+      if total >= payload.len() as u64 {
+        break;
+      }
+    }
+    assert_eq!(
+      total,
+      payload.len() as u64,
+      "续传要把整包下完（最近一次错误：{last}）"
+    );
+    assert_eq!(
+      std::fs::read(&path).expect("读回下载结果"),
+      payload,
+      "续传拼出来的文件必须与原包逐字节相同（不能重复也不能缺口）"
+    );
+    let has_range = seen
+      .lock()
+      .unwrap()
+      .iter()
+      .any(|r| r.as_deref().is_some_and(|h| h.starts_with("bytes=")));
+    assert!(
+      has_range,
+      "断流后必须带 Range 续传（每次都从头下 = 慢网络永远下不完）"
+    );
+    let _ = std::fs::remove_file(&path);
+    // 顺手确认写下去的是真的（避免 unwrap 静默）
+    assert!(std::io::stdout().flush().is_ok());
+  }
+
+  /// 服务器**不理 `Range`**（回 200 整包）时不许把这包接在旧进度后面（否则文件翻倍）。
+  #[tokio::test]
+  async fn restarts_when_server_ignores_range() {
+    use std::io::{Seek, SeekFrom, Write};
+    let payload = payload_of(3000);
+    let (url, _seen) = serve(payload.clone(), vec![Act::Full]).await;
+    let path = tmp_file("ignore-range");
+    // 先造出「上次下了一半」的残留
+    std::fs::write(&path, vec![0xAAu8; 1000]).expect("写残留");
+    let client = download_client().expect("建客户端");
+    let mut total = 1000u64;
+    let mut f = std::fs::OpenOptions::new()
+      .create(true)
+      .write(true)
+      .truncate(false)
+      .open(&path)
+      .expect("打开临时文件");
+    f.seek(SeekFrom::Start(total)).expect("定位");
+    fetch_into(&client, &url, &mut f, &mut total, |_| {})
+      .await
+      .expect("整包响应应当成功");
+    drop(f);
+    assert_eq!(total, payload.len() as u64, "total 必须被归零重算");
+    assert_eq!(
+      std::fs::read(&path).expect("读回"),
+      payload,
+      "服务器不理 Range 时必须清空重来，不能把整包接在旧进度后面"
+    );
+    let _ = std::fs::remove_file(&path);
+    assert!(std::io::stdout().flush().is_ok());
+  }
+
+  /// 卡住（在走但没数据）→ 报**下载超时**，不是那句看不懂的 `error decoding response body`；
+  /// 而且已经落盘的字节要留着（下次接着下）。
+  #[tokio::test]
+  async fn stalled_transfer_reports_idle_timeout_and_keeps_progress() {
+    use std::io::{Seek, SeekFrom};
+    let payload = payload_of(4000);
+    let (url, _seen) = serve(payload.clone(), vec![Act::StallAfter(800)]).await;
+    let path = tmp_file("stall");
+    let _ = std::fs::remove_file(&path);
+    // 客户端把空闲超时收紧到 300 ms（生产值是 IDLE_TIMEOUT_S 秒，测试等不起）
+    let client = reqwest::Client::builder()
+      .user_agent(UA)
+      .read_timeout(std::time::Duration::from_millis(300))
+      .build()
+      .expect("建客户端");
+    let mut total = 0u64;
+    let mut f = std::fs::OpenOptions::new()
+      .create(true)
+      .write(true)
+      .truncate(false)
+      .open(&path)
+      .expect("打开临时文件");
+    f.seek(SeekFrom::Start(0)).expect("定位");
+    let err = fetch_into(&client, &url, &mut f, &mut total, |_| {})
+      .await
+      .expect_err("卡住必须报错");
+    assert!(
+      err.contains("下载超时"),
+      "空闲超时必须报「下载超时」，实际：{err}"
+    );
+    assert_eq!(total, 800, "已经落盘的字节要留着（续传的起点）");
+    let _ = std::fs::remove_file(&path);
   }
 }
