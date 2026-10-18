@@ -62,9 +62,11 @@ release 构建同样保留（不允许用编译开关剔除）。
   `remote_input` 开关状态、最近错误原因，以及 `codec`（Opus 版本 + 实际加载到的
   `opus.dll` 路径；加载不到时为 `unavailable` + 原因）。
 - 另有 `update`（更新检查，DESIGN.md §4.2）：阶段（`idle` / `checking` / `up_to_date` /
-  `available` / `downloading` / `ready` / `installing` / `unsupported` / `failed`）、
-  本机显示版本与构建时间戳、最新 tag / 显示版本 / 发布日期 / 更新说明、
-  匹配到的产物名与地址、下载字节进度、已下载路径、失败原因。
+  `available` / `downloading` / `ready` / `installing` / `installed` / `unsupported` / `failed`）、
+  本机显示版本与构建时间戳、**本机安装方式 `install_kind`**（`appimage` / `deb` / `rpm` /
+  `nsis` …；Linux 由二进制里的 bundle type 标记决定，产物**按它挑**）、
+  最新 tag / 显示版本 / 发布日期 / 更新说明、匹配到的产物名与地址、下载字节进度、
+  已下载路径、失败原因。
   **注意**：`net` 是用户可见功能，**绑所有网卡的 59123**（手机要能连），
   与本节「只绑 127.0.0.1」的调试接口是两回事；远程输入另有独立开关且**默认关闭**。
 
@@ -245,13 +247,30 @@ release 构建同样保留（不允许用编译开关剔除）。
     开发构建没有 CI 注入的时间戳，此时**不下「已是最新」的结论**，报「开发构建」。
   - **产物按文件名后缀匹配，不看版本号**（同上）：Windows `-setup.exe`（NSIS；
     **Windows 只发 exe，不出 MSI**——`src-tauri/tauri.windows.conf.json` 把 Windows 的
-    `bundle.targets` 钉成 `["nsis"]`）；Linux `.AppImage` → `.deb` → `.rpm`；安卓 `.apk`。
+    `bundle.targets` 钉成 `["nsis"]`）；Linux **按本机安装方式各认一条**（`.AppImage` /
+    `.deb` / `.rpm`，不是优先级列表）；安卓 `.apk`。
     `release.yml` 统一重命名产物，后缀因此稳定。
-  - **安装分平台**（`update/install_{windows,linux,other}.rs`）：Windows = NSIS 静默
-    `/S /UPDATE /NS /R`，**必须先退进程再装**（安装器开头有 `CheckIfAppIsRunning` 会拦下
-    正在运行的 exe，故用脱离的 cmd 先歇几秒再拉安装器，随后 `app.exit(0)`）；
-    Linux = 仅 AppImage 能自替换（覆盖自身，用户重启生效），deb/rpm 交系统包管理器 →
-    明确「不支持 + release 页面」；其它平台明确不可用。**不静默失败**。
+  - **安装分平台 · 先认「本机是哪种安装」再挑包**（`update/install_{windows,linux,other}.rs`）：
+    - **认安装方式用 Tauri 3 自己的标记，不靠 dpkg/rpm 查询**：bundler 打包时把
+      `__TAURI_BUNDLE_TYPE_VAR_{APP,DEB,RPM}` 打进二进制（实测本仓库产物：deb 里是
+      `VAR_DEB`、AppImage 里是 `VAR_APP`），`tauri::utils::platform::bundle_type()` 直接读它
+      → `Status.install_kind`。不用去问包数据库、不用猜装到 `/usr/bin` 还是 `~/.local`。
+    - **产物按安装方式挑，一种方式只认自己那种包**（不跨格式兜底）：deb 用户下 `.deb`、
+      rpm 用户下 `.rpm`、AppImage 用户下 `.AppImage`。以前 Linux 是「AppImage 优先」，
+      结果 deb 用户白下 140 MB 的 AppImage 而且装不上（`install()` 只会报不支持）。
+      认不出安装方式（没打标的二进制，如直接跑 `target/debug/purevox`）→ 不下载，
+      `unsupported` + 原因；release 里缺你那种包 → `failed` + 原因（都带 release 页面出口）。
+    - **Windows** = NSIS 静默 `/S /UPDATE /NS /R`（**必须先退进程再装**：安装器开头有
+      `CheckIfAppIsRunning` 会拦下正在运行的 exe，故用脱离的 cmd 先歇几秒再拉安装器，
+      随后 `app.exit(0)`）。
+    - **Linux = 三种包都能更新，分两条路**：AppImage 自身是可替换的文件 → 写同目录临时名
+      再 `rename`（正在跑的进程用的是挂载副本，覆盖源文件不影响它；实测覆盖后挂载仍可读）；
+      **deb / rpm 属于包管理器**（`/usr/bin/purevox` 是 root 所有，`cp` 覆盖运行中的二进制
+      会 `ETXTBSY`），故走 `pkexec dpkg -i <包>` / `pkexec rpm -U <包>`（polkit 图形授权框，
+      与上游 updater 2.10+ 同一条路），**不用 zenity/sudo 那套降级**；`pkexec` 缺失或用户
+      取消 → 明确报错（带包路径），不静默。deb/rpm **装完不退出**（阶段 `installed`），
+      重启 PureVox 生效 —— 不打断正在用的会话。
+    - 其它平台明确不可用。**不静默失败**。`/debug` 的 `install_kind` 一眼看出走的是哪条路。
   - HTTP 客户端用 `reqwest`（已随 `tauri` 进入依赖树，TLS 后端与 `ort` 的 `ureq` 同一套
     native-tls，不新增 C 编译链）。状态进快照 `update` 段（与界面同源）。
 - **推理链路**（`src-tauri/src/infer/`）：用 `ort`（onnxruntime）流式推理。模型契约统一为

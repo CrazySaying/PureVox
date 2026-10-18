@@ -124,6 +124,13 @@
 6. **Windows 静默自更新必须先退进程**：NSIS 安装器开头有 `CheckIfAppIsRunning`，
    正在运行的 exe 会被拦下弹框。用**脱离的 cmd**（`ping -n 5 127.0.0.1 >nul & 安装器 /S
    /UPDATE /NS /R`）先歇几秒等本进程退出，再由安装器接手并按 `/R` 重启应用。
+7. **「本机是哪种包」由二进制自己回答，别去问 dpkg/rpm**（2026-10-18）：bundler 打包时把
+   `__TAURI_BUNDLE_TYPE_VAR_{APP,DEB,RPM,MSI,NSS}` 打进二进制，`tauri::utils::platform::bundle_type()`
+   读它即可（`tauri::utils` = `pub use tauri_utils as utils`，`platform` 与 `config::BundleType`
+   都是公开的）。本仓库产物实测：deb 里是 `VAR_DEB`、AppImage 里是 `VAR_APP`。
+   **每个包各自被改写过**，所以同一份源码打三种 Linux 包会得到三个不同的二进制 ——
+   这正是「一个包只认自己那种更新产物」的依据（`update/install_linux.rs`）。
+   没打标的二进制（`cargo run`）返回 `None`，Linux 侧据此落 `unknown`、不下载任何包。
 
 ---
 

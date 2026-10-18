@@ -33,11 +33,27 @@ use super::{Phase, Status};
 /// 本平台在 release 产物里认的后缀：**只有 NSIS**（`tauri.windows.conf.json` 只出它）。
 pub const ASSET_SUFFIXES: &[&str] = &["-setup.exe"];
 
-/// 拉起安装器并返回一句给界面看的话；调用方随后应退出进程。
-pub fn install(st: &Status) -> Result<String, String> {
-  if st.phase != Phase::Ready {
-    return Err("还没有下载好安装包".into());
+/// 本平台认的产物后缀（与 [`ASSET_SUFFIXES`] 同一份；名字与 Linux 侧对齐，`mod.rs` 只认函数）。
+pub fn asset_suffixes() -> &'static [&'static str] {
+  ASSET_SUFFIXES
+}
+
+/// 安装方式短名（进 `/debug` 的 `update.install_kind`）。Windows 只发 NSIS，
+/// 正常就是 `nsis`；开发构建（没打标）如实报 `unknown`。
+pub fn kind_name() -> &'static str {
+  use tauri::utils::config::BundleType;
+  use tauri::utils::platform::bundle_type;
+  match bundle_type() {
+    Some(BundleType::Nsis) => "nsis",
+    Some(BundleType::Msi) => "msi",
+    _ => "unknown",
   }
+}
+
+/// 拉起安装器并返回一句给界面看的话；调用方随后应退出进程。
+///
+/// 状态已由 `mod.rs` 推到 `Installing`（「安装器接管、进程即将退出」），这里不再动它。
+pub fn install(st: &Status) -> Result<String, String> {
   let exe = std::path::Path::new(&st.saved_path);
   if !exe.is_file() {
     return Err(format!("安装包不见了：{}", st.saved_path));
@@ -54,6 +70,8 @@ pub fn install(st: &Status) -> Result<String, String> {
     .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
     .spawn()
     .map_err(|e| format!("拉起安装器失败：{e}"))?;
+  // 显式写一次：Windows 的最终阶段就是 `Installing`（安装器接管、本进程退出，
+  // 由安装器的 `/R` 重启），调用方据此决定是否退进程。Linux 那边最终是 `Installed`。
   super::with(|s| s.phase = Phase::Installing);
   Ok("安装器已启动，正在退出并更新…".into())
 }

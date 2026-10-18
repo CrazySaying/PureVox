@@ -60,8 +60,13 @@ pub enum Phase {
   Downloading,
   /// 已下载到本地，可安装
   Ready,
-  /// 正在安装（安装器已拉起，进程即将退出）
+  /// 正在安装（安装器/包管理器已接管；界面显示「正在安装…」）
   Installing,
+  /// **装好了，等用户重启**（Linux：AppImage 已替换完或 deb/rpm 已由包管理器装完；
+  /// 本进程继续跑，下次启动就是新版）
+  /// （Windows / 其它平台不会构造它，故显式忽略 dead_code）
+  #[allow(dead_code)]
+  Installed,
   /// 本平台不支持自动更新（给出原因 + release 页面）
   /// （只在部分平台的 `install_*.rs` 里构造——本平台支持时该分支不会被走到）
   #[allow(dead_code)]
@@ -78,6 +83,10 @@ pub struct Status {
   pub current_version: String,
   /// 本机构建时间戳（`version::STAMP`，开发态为空）
   pub current_stamp: String,
+  /// 本机的**安装方式**（`appimage` / `deb` / `rpm` / 其它平台的 `nsis` …）。
+  /// Linux 侧由二进制里的 bundle type 标记决定（`tauri::utils::platform::bundle_type()`），
+  /// **产物按它来挑**：deb 用户只下 `.deb`，不会去下 140 MB 的 AppImage。
+  pub install_kind: String,
   /// 最新 release 的 tag（`v2026.10.12.1430`）
   pub latest_tag: String,
   /// 最新 release 的显示版本（由 tag 推导的 `yy.M.d`）
@@ -108,6 +117,7 @@ impl Default for Status {
       phase: Phase::Idle,
       current_version: version::VERSION.to_string(),
       current_stamp: version::STAMP.to_string(),
+      install_kind: imp::kind_name().to_string(),
       latest_tag: String::new(),
       latest_version: String::new(),
       notes: String::new(),
@@ -203,12 +213,14 @@ fn stamp_to_version(stamp: &str) -> String {
   format!("{}.{}.{}", y % 100, mo, d)
 }
 
-/// release 的产物里挑本平台能用的那个（**只看后缀，不看版本号**）。
-/// 返回 `(产物名, 下载地址, 字节数)`。
-fn pick_asset(assets: &[Asset]) -> Option<(String, String, u64)> {
-  // 按优先级依次找候选后缀；CI 产出的文件名见 `release.yml`（统一重命名成
+/// 按给定后缀优先级挑产物（纯函数，单测直接喂后缀表）。
+///
+/// 后缀表来自平台实现（`install_*.rs` 的 `asset_suffixes()`）：Linux 是**按安装方式**
+/// 给出一条（deb 只认 `.deb`），不再有「AppImage 优先」的跨格式兜底 —— 别的格式的包
+/// 用户装不上，下了也是白下。
+fn pick_asset_with(assets: &[Asset], suffixes: &[&str]) -> Option<(String, String, u64)> {
+  // CI 产出的文件名见 `release.yml` / `release_stage.sh`（统一重命名成
   // `PureVox-<版本>-<平台>.<ext>`，故后缀稳定）。
-  let suffixes: &[&str] = imp::ASSET_SUFFIXES;
   for suf in suffixes {
     if let Some(a) = assets
       .iter()
@@ -270,7 +282,7 @@ pub async fn check() -> Result<Status, String> {
       return Err(msg);
     }
   };
-  let asset = pick_asset(&rel.assets);
+  let asset = pick_asset_with(&rel.assets, imp::asset_suffixes());
 
   with(|s| {
     s.latest_tag = rel.tag_name.clone();
@@ -294,8 +306,28 @@ pub async fn check() -> Result<Status, String> {
     if version::is_dev() {
       s.phase = Phase::Idle;
       s.reason = "开发构建（无 CI 版本戳），不判断更新".into();
-    } else {
-      s.phase = decide(version::STAMP, &latest_stamp);
+      return;
+    }
+    s.phase = decide(version::STAMP, &latest_stamp);
+    // 只有「真有新版」时才值得报「本机这种安装方式没有对应的包」——已是最新时
+    // 报这个只会让人以为更新坏了。
+    if s.phase == Phase::Available && asset.is_none() {
+      let suffixes = imp::asset_suffixes();
+      if suffixes.is_empty() {
+        // 认不出安装方式（没打标的二进制）：结构性不可用，别让用户反复点
+        s.phase = Phase::Unsupported;
+        s.reason = format!(
+          "认不出本机安装方式（{}），无法自动更新；请到 release 页面手动下载安装",
+          imp::kind_name()
+        );
+      } else {
+        s.phase = Phase::Failed;
+        s.reason = format!(
+          "这个 release 里没有 {} 安装用的包（找过 {}）",
+          imp::kind_name(),
+          suffixes.join(" / ")
+        );
+      }
     }
   });
   Ok(status())
@@ -440,8 +472,41 @@ mod imp;
 mod imp;
 
 /// 安装已下载的产物（平台实现，见 `install_*.rs`）。
+///
+/// **在状态锁里先把 `Ready` 推到 `Installing`**：既是「不许跳步」的守卫（连点两次安装，
+/// 第二次会立刻被挡回），也让界面在 `pkexec` 授权框那几秒里显示「正在安装…」。
+///
+/// 最终阶段由各平台实现落下（`main.rs` 据此决定要不要退进程）：
+/// - Windows → 保持 `Installing`（安装器接管、**本进程必须退出**）；
+/// - Linux → `Installed`（装好了，进程继续跑，重启生效）或 `Failed`（带原因）；
+/// - 其它平台 → `Unsupported`（带原因）。
 pub fn install() -> Result<String, String> {
-  imp::install(&status())
+  {
+    let mut s = hub().status.lock().unwrap();
+    if s.phase != Phase::Ready {
+      return Err(format!(
+        "当前状态不能安装（{:?}）：先「检查更新」再「下载」",
+        s.phase
+      ));
+    }
+    s.phase = Phase::Installing;
+    s.reason.clear();
+  }
+  let r = imp::install(&status());
+  if let Err(e) = &r {
+    // 平台实现通常已经写好 `Failed` + 原因；这里兜底「什么都没写」的那种
+    // （原因就用返回的 Err 文本），免得界面永远停在「正在安装…」（不静默失败）。
+    // `Unsupported` 不许被降级成 `Failed`。
+    with(|s| {
+      if s.phase == Phase::Installing {
+        s.phase = Phase::Failed;
+      }
+      if s.phase == Phase::Failed && s.reason.is_empty() {
+        s.reason = e.clone();
+      }
+    });
+  }
+  r
 }
 
 #[cfg(test)]
@@ -503,37 +568,73 @@ mod tests {
   }
 
   #[test]
-  fn pick_asset_prefers_this_platform_then_falls_back() {
-    // 产物名按**本平台的**后缀构造，不能硬编码 Windows 产物名：ASSET_SUFFIXES 来自
-    // install_*.rs，是平台相关的（Windows 是 setup.exe，Linux 是 AppImage/deb/rpm）。
-    // 写死 Windows 名字的话，Linux 上 pick_asset 一个都匹配不上直接 panic——
-    // 而 Windows 上永远绿。这类错只有真在 Linux 上跑一遍门禁才会暴露。
-    let suffixes: &[&str] = imp::ASSET_SUFFIXES;
-    assert!(
-      !suffixes.is_empty(),
-      "本平台至少要有一个可安装产物后缀，否则自动更新无从谈起"
-    );
+  fn pick_asset_with_uses_suffix_priority() {
+    // 后缀的先后 = 优先级：同一份清单里出现多个候选时，命中哪个只由 suffixes 的顺序
+    // 决定（外层遍历 suffixes、内层 find assets），与产物在 release 里的先后无关。
+    // 注意 Linux 的表现在是「一种安装方式一条」，跨格式兜底已被刻意去掉 ——
+    // 见 install_linux.rs：把 AppImage 塞给 deb 用户，他装不上。
+    let suffixes: &[&str] = &[".deb", ".rpm", ".appimage"];
     const V: &str = "26.10.12";
-    // 干扰项：本平台之外的产物（zip 谁都不是）
-    let mut assets = vec![asset(&format!("PureVox-{V}-other.tar.gz"))];
-    // 本平台的每个候选都塞进去，但**倒序**放：命中哪个只由 ASSET_SUFFIXES 的优先级决定
-    // （外层遍历 suffixes、内层 find assets），与清单里的先后无关。
-    for s in suffixes.iter().rev() {
-      assets.push(asset(&format!("PureVox-{V}-cand{s}")));
-    }
-    let (name, url, size) = pick_asset(&assets).expect("应匹配到本平台产物");
-    let want = format!("PureVox-{V}-cand{}", suffixes[0]);
-    assert_eq!(name, want, "应按 ASSET_SUFFIXES 的优先级选第一个");
+    // 干扰项：谁都不认的包 + 三个候选**倒序**放
+    let assets = vec![
+      asset(&format!("PureVox-{V}-other.tar.gz")),
+      asset(&format!("PureVox-{V}-cand.appimage")),
+      asset(&format!("PureVox-{V}-cand.rpm")),
+      asset(&format!("PureVox-{V}-cand.deb")),
+    ];
+    let (name, url, size) = pick_asset_with(&assets, suffixes).expect("应匹配到候选产物");
+    let want = format!("PureVox-{V}-cand.deb");
+    assert_eq!(name, want, "应按 suffixes 的优先级选第一个");
     assert_eq!(url, format!("https://example.invalid/{want}"));
     assert_eq!(size, 1024);
+
+    // 产物名大小写混着来（GitHub 上的名字是人起的）也得认
+    let upper = [asset(&format!("PureVox-{V}-X.APPIMAGE"))];
+    assert!(pick_asset_with(&upper, &[".appimage"]).is_some());
   }
 
   #[test]
-  fn pick_asset_returns_none_when_no_match() {
-    // 其它平台的 ASSET_SUFFIXES（install_other.rs 是空表）不该误配
-    let assets = [asset("PureVox-Android-26.10.12-arm64.apk")];
-    let suffixes: &[&str] = &["__no_such_suffix__"];
-    assert!(suffixes.iter().all(|s| !assets[0].name.ends_with(s)));
+  fn pick_asset_with_returns_none_for_foreign_assets() {
+    // 安卓 apk / 其它格式不能被桌面端认领：认领了就会白下一个装不上的包
+    let assets = [
+      asset("PureVox-26.10.12-android-arm64.apk"),
+      asset("PureVox-26.10.12-other.tar.gz"),
+    ];
+    for suf in [".deb", ".rpm", ".appimage", "-setup.exe"] {
+      assert!(
+        pick_asset_with(&assets, &[suf]).is_none(),
+        "后缀 {suf} 不该匹配到别的产物"
+      );
+    }
+    // 空表（认不出安装方式 / 其它平台）一律不挑
+    assert!(pick_asset_with(&assets, &[]).is_none());
+  }
+
+  /// **每种安装方式只认自己那种包**：deb 用户不会下到 140 MB 的 AppImage（装不上），
+  /// rpm 同理。查的是真实表（`install_linux.rs` 的 `suffixes_for`），不解析源码。
+  ///
+  /// 只在 Linux 上编译（`install_linux.rs` 本身就是 `cfg(linux)`）；`tests.yml` 的
+  /// Linux 腿会跑到它 —— Windows 上永远绿的那种测试在这儿没有意义。
+  #[cfg(target_os = "linux")]
+  #[test]
+  fn linux_install_kinds_map_to_their_own_package() {
+    use super::imp::{Kind, suffixes_for};
+    for (k, want) in [
+      (Kind::AppImage, ".appimage"),
+      (Kind::Deb, ".deb"),
+      (Kind::Rpm, ".rpm"),
+    ] {
+      assert_eq!(
+        suffixes_for(k),
+        &[want][..],
+        "{} 只认自己的后缀（跨格式兜底会把装不上的包下下来）",
+        k.as_str()
+      );
+    }
+    assert!(
+      suffixes_for(Kind::Unknown).is_empty(),
+      "认不出安装方式时不许挑任何包（宁可报原因，也不白下）"
+    );
   }
 
   #[test]
@@ -675,39 +776,52 @@ mod tests {
     }
   }
 
-  /// **CI 产出的产物名必须落在运行期 `ASSET_SUFFIXES` 认的后缀里** —— 这条才是真正会伤到
-  /// 用户的那一种漂移，而上面那个测试**抓不到**。
+  /// **CI 产出的产物名必须落在运行期某张后缀表里** —— 这条才是真正会伤到用户的那一种漂移，
+  /// 而上面那个测试**抓不到**。
   ///
-  /// `pick_asset` 拿产物名去比对 `install_{linux,windows}.rs` 里那三个字面量（"`.deb`"）。
+  /// 运行期是拿产物名去比对 `install_{linux,windows}.rs` 里的后缀字面量（"`.deb`"）。
   /// 两边各写各的，于是「把 release 里的 `-linux-x64.deb` 改名成 `-linux-x86_64.deb`」
   /// 这种改动会让上面所有断言照样全绿（它们只查内部一致性），但**从此再也匹配不到任何
   /// 产物 —— 自动更新彻底静默失效，用户不会看到任何报错，只会发现「永远有新版本」**。
   ///
   /// 所以这里把三份东西交叉比对：`release_stage.sh` 里 `stage` 出的名字、
-  /// `install_*.rs` 里 `ASSET_SUFFIXES` 的字面量、以及本模块的 `pick_asset` 本身
+  /// `install_*.rs` 里 `ASSET_SUFFIXES` 的字面量、以及本模块的 `pick_asset_with` 本身
   /// （构造一遍假资产列表走一遍真实函数，不只是比对字符串）。
   #[test]
   fn staged_names_are_claimable_by_pick_asset() {
     let linux_rs = include_str!("install_linux.rs");
     let windows_rs = include_str!("install_windows.rs");
 
+    /// 从平台源码里抠出 `ASSET_SUFFIXES` 表里的全部后缀字面量。
+    ///
+    /// 表有两种排版：Windows 是扁平的 `&["-setup.exe"]`，Linux 是**按安装方式**分行的
+    /// `(Kind::Deb, &[".deb"])`（2026-10-18 起）。这里不按排版去 split，只收这一段里的
+    /// `"…"` 字面量，且只留「以 `.` 开头」或「以 `.exe` 结尾」的 —— 注释和枚举名不会被当成后缀。
     fn suffixes_of(src: &str, platform: &str) -> Vec<String> {
-      let line = src
-        .lines()
-        .find(|l| l.contains("ASSET_SUFFIXES: &[&str] = &["))
-        .unwrap_or_else(|| panic!("{platform} 里找不到 ASSET_SUFFIXES 定义"));
-      line
-        // `&[` 在 `&[&str] = &[...]` 里出现**两次**（类型与数组各一），所以要 rsplit 取
-        // 最后一段；用 split().nth(1) 会取到中间的 `&str] = `，凭空只认出 1 个后缀。
-        .rsplit("&[")
-        .next()
-        .and_then(|s| s.split(']').next())
-        .expect("数组字面量必闭合")
-        .split(',')
-        .map(|s| s.trim().trim_matches('"'))
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_ascii_lowercase())
-        .collect()
+      let mut out = Vec::new();
+      let mut in_table = false;
+      for line in src.lines() {
+        if !in_table {
+          in_table = line.contains("ASSET_SUFFIXES:");
+          if !in_table {
+            continue;
+          }
+        }
+        for lit in line.split('"').skip(1).step_by(2) {
+          let s = lit.trim().to_ascii_lowercase();
+          if s.starts_with('.') || s.ends_with(".exe") {
+            out.push(s);
+          }
+        }
+        if line.trim_end().ends_with("];") {
+          break;
+        }
+      }
+      assert!(
+        !out.is_empty(),
+        "{platform} 的 ASSET_SUFFIXES 里一个后缀都没认出来（表换了写法要同步这里）"
+      );
+      out
     }
 
     let known: Vec<String> = suffixes_of(linux_rs, "linux")
@@ -719,6 +833,13 @@ mod tests {
       "只认出 {} 个后缀，两个平台的定义都被改了？",
       known.len()
     );
+    // 三个 Linux 安装方式各一条 + Windows 一条 NSIS（结构性断言：Linux 的三种包都得有人认领）
+    for want in [".deb", ".rpm", ".appimage", "-setup.exe"] {
+      assert!(
+        known.iter().any(|s| s == want),
+        "后缀 {want} 没有任何平台认领（现在是 {known:?}）"
+      );
+    }
 
     // 走一遍真实的 stage 模板：把 ${VERSION} 换成假版本，取出后缀
     let want = stamp_to_version(&tag_to_stamp("v2026.10.14.1530").expect("合法 tag"));
@@ -754,7 +875,8 @@ mod tests {
       );
     }
 
-    // 不止比字符串：用真实 pick_asset 走一遍，确认它真能从这批产物里挑出东西
+    // 不止比字符串：用真实函数走一遍。喂的是**两个平台后缀的并集** ——
+    // 单平台只认自己的格式（deb 不认 appimage），CI 跑哪个平台都能过。
     let assets: Vec<Asset> = staged
       .iter()
       .map(|n| Asset {
@@ -763,9 +885,10 @@ mod tests {
         size: 1,
       })
       .collect();
+    let refs: Vec<&str> = known.iter().map(|s| s.as_str()).collect();
     assert!(
-      pick_asset(&assets).is_some(),
-      "pick_asset 对这批真实产物名一个都挑不出来"
+      pick_asset_with(&assets, &refs).is_some(),
+      "pick_asset_with 对这批真实产物名一个都挑不出来"
     );
   }
 }

@@ -532,18 +532,28 @@ async fn update_download() -> Result<update::Status, String> {
   update::download().await
 }
 
-/// 安装已下载的产物。Windows = NSIS 静默（拉起安装器后本进程退出），
-/// Linux AppImage = 覆盖自身（需用户重启）。返回一句给界面显示的话。
+/// 安装已下载的产物。Windows = NSIS 静默（拉起安装器后本进程退出并由安装器重启）；
+/// Linux = AppImage 覆盖自身 / deb、rpm 走 `pkexec` 包管理器（装完**不退出**，重启生效）。
+///
+/// **必须异步 + `spawn_blocking`**：deb / rpm 的 `pkexec` 会等到用户在 polkit 授权框里
+/// 点完、包管理器装完（几秒到几十秒）才返回，同步命令会卡住主线程（界面与状态轮询一起停）。
 #[tauri::command]
-fn update_install(app: tauri::AppHandle) -> Result<String, String> {
-  let msg = update::install()?;
-  // 装完由安装器（/R）或用户重启；引擎先停，避免占着音频设备不退。
-  app.state::<Arc<AudioManager>>().stop();
-  // 给安装器一点时间看到进程已退出（安装器侧也有 CheckIfAppIsRunning 兜底）。
-  std::thread::spawn(move || {
-    std::thread::sleep(std::time::Duration::from_millis(1200));
-    app.exit(0);
-  });
+async fn update_install(app: tauri::AppHandle) -> Result<String, String> {
+  let msg = tokio::task::spawn_blocking(update::install)
+    .await
+    .map_err(|e| format!("安装任务中断：{e}"))??;
+  // 最终阶段是 `Installing` = 安装器已接管、**本进程必须退出**（NSIS 安装器开头的
+  // `CheckIfAppIsRunning` 会拦下正在运行的 exe）；Linux 装完是 `Installed`，
+  // 进程继续跑、下次启动就是新版 —— 不打断用户正在用的会话。
+  if update::status().phase == update::Phase::Installing {
+    // 引擎先停，避免占着音频设备不退。
+    app.state::<Arc<AudioManager>>().stop();
+    // 给安装器一点时间看到进程已退出（安装器侧也有 CheckIfAppIsRunning 兜底）。
+    std::thread::spawn(move || {
+      std::thread::sleep(std::time::Duration::from_millis(1200));
+      app.exit(0);
+    });
+  }
   Ok(msg)
 }
 

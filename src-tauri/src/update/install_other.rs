@@ -20,7 +20,17 @@
 
 use super::{Phase, Status};
 
+/// 没有可认领的产物后缀 → `check` 那边直接落 `unsupported` + 原因，不会白下载。
 pub const ASSET_SUFFIXES: &[&str] = &[];
+
+pub fn asset_suffixes() -> &'static [&'static str] {
+  ASSET_SUFFIXES
+}
+
+/// 安装方式短名（进 `/debug` 的 `update.install_kind`）：本平台没有实现，只报系统名。
+pub fn kind_name() -> &'static str {
+  std::env::consts::OS
+}
 
 pub fn install(_st: &Status) -> Result<String, String> {
   super::with(|s| {

@@ -319,20 +319,30 @@ wasm 只要浏览器有 `WebAssembly` 就行。帧长按引擎 hop 配（`channe
 | --- | --- | --- |
 | `idle` | 尚未检查（开发构建也停在这，**不下「已是最新」的结论**） | 初始 / 开发构建 |
 | `checking` → `up_to_date` / `available` | 查 GitHub 并比较 | 用户点「检查更新」 |
-| `downloading` → `ready` | 下载本平台产物到 `~/.purevox/update/` | 状态 `available` |
-| `installing` | 平台安装器已拉起，进程即将退出 | 状态 `ready` |
-| `unsupported` / `failed` | 本平台不能自动装 / 出错（带原因） | 安装失败 |
+| `downloading` → `ready` | 下载本机**安装方式**对应的产物到 `~/.purevox/update/` | 状态 `available` |
+| `installing` | 安装中：`pkexec` 授权框 / 安装器已拉起（Windows 停在这 = 进程即将退出） | 状态 `ready` |
+| `installed` | **装好了、等重启**（Linux：AppImage 已替换或 deb/rpm 已装完，进程继续跑） | 安装成功 |
+| `unsupported` / `failed` | 本机这种安装方式不能自动装 / 出错（带原因） | 装不上 |
 
 - **比较依据 = tag 的完整时间戳**（`v2026.10.08.1430`），不是显示版本号 `26.10.8`
   ——同日发两次时显示版本相同，靠时分才能分出新旧。解析见 `version::parse_stamp`。
   开发构建没有 CI 注入的时间戳（`version::is_dev()`），此时只报「开发构建」，
   **绝不拿 Cargo 的 `0.1.0` 去和线上比出一个假结论**。
-- **产物匹配只看后缀**：Windows `-setup.exe`（NSIS；Windows 只发 exe，不出 MSI，见
-  `src-tauri/tauri.windows.conf.json` 钉死 `bundle.targets=["nsis"]`）；Linux `.AppImage` →
-  `.deb` → `.rpm`；Android `.apk`。CI 统一重命名产物，后缀因此稳定。
+- **先认「本机是哪种安装」，再挑对应的包**（`Status.install_kind`）：Linux 的安装方式由
+  Tauri 打进二进制的 bundle type 标记给出（`tauri::utils::platform::bundle_type()`：
+  AppImage / deb / rpm），不靠查询 dpkg/rpm，也不靠猜路径。**一种安装方式只认自己那种包**
+  （不跨格式兜底）：deb 用户下 `.deb`、rpm 用户下 `.rpm`、AppImage 用户下 `.AppImage`
+  —— 把 140 MB 的 AppImage 塞给 deb 用户，他装不上，界面还会白显示「已下载」。
+  认不出安装方式（没打标的二进制）→ 不下载 + `unsupported` + 原因；release 缺你那种包
+  → `failed` + 原因。Windows 只有 `-setup.exe`（NSIS；不出 MSI，见
+  `src-tauri/tauri.windows.conf.json` 钉死 `bundle.targets=["nsis"]`），Android `.apk`。
+  CI 统一重命名产物，后缀因此稳定。
 - **安装是平台实现**（`update/install_<platform>.rs`）：Windows 用 NSIS 静默
   `/S /UPDATE /NS /R`，且**必须先退进程再装**（安装器会拦下正在运行的 exe）；
-  Linux 仅 AppImage 能自替换；其余明确「不支持 + 给出 release 页面」，**不静默失败**。
+  Linux 三种包都支持 —— AppImage 覆盖自身（临时名 + `rename`，跑着的进程用挂载副本不受影响），
+  deb / rpm 交系统包管理器（`pkexec dpkg -i` / `pkexec rpm -U`，polkit 图形授权，
+  与上游 updater 2.10+ 同路），装完**不退出**、重启生效；其余平台明确「不支持 + 给出
+  release 页面」，**不静默失败**。
 - **Android 侧的应用内更新**（`android/.../update/`）是**同一数据源、同一判定**的另一端实现：
   手动触发，比较 tag 时间戳映射出的 `yyMMddHHmm ÷ 10` 与安装包 `versionCode`
   （÷10 是为了塞进 Int32，见 AGENTS.md §1.3），产物按 `.apk` 匹配，
@@ -465,7 +475,7 @@ pub fn resolve(key: &str, kind: ModelKind) -> Option<&'static ModelDesc>;
 | 回环 | ✅ 已实现（`audio/loopback.rs`，WASAPI loopback） | 作为「输入行」的源（`loopback`，电脑播放音频） |
 | 媒体 | ✅ 已实现（后端 + 界面，2026-10-12）：`soundpad` / `player` 处理行、媒体库导入（symphonia）、每音效热键、MediaHub 控制 | §4 |
 | **网络（手机 ⇄ 电脑）** | ✅ 已实现：`remote_mic` 输入行 + `remote_speaker` 输出行 + Opus（运行时加载预编译 `opus.dll`）+ `text` 打字 / `key` 全尺寸键盘（默认关闭，界面开关） | §4 / §4.1 |
-| **更新检查 / 更新** | ✅ 已实现（2026-10-12）：GitHub Releases 查 → 下载 → 静默安装（Windows NSIS / Linux AppImage 自替换），顶栏「更新」面板 | §4.2 |
+| **更新检查 / 更新** | ✅ 已实现（2026-10-12；Linux 三种包 2026-10-18）：GitHub Releases 查 → 按**本机安装方式**下载对应产物 → 静默安装（Windows NSIS / Linux AppImage 自替换、deb·rpm 走 `pkexec` 包管理器），顶栏「更新」面板 | §4.2 |
 | **版本号 年.月.日** | ✅ 已实现（2026-10-12）：`yy.m.d` 显示、tag 全时间戳比较；Android `versionCode` = `yyMMddHHmm ÷ 10` 单调递增（十位数超 Int32，见 AGENTS §1.3） | — |
 
 **实施顺序**：

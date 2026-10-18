@@ -223,6 +223,7 @@
     '正在下载…': 'Downloading…',
     '已下载，可以安装': 'Downloaded, ready to install',
     '正在安装…': 'Installing…',
+    '已安装，重启 PureVox 生效': 'Installed — restart PureVox to apply',
     '本平台不支持自动更新': 'Automatic updates are not supported on this platform',
     失败: 'Failed',
     '下载失败：': 'Download failed: ',

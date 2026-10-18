@@ -43,6 +43,7 @@
     downloading: () => T('正在下载…'),
     ready: () => T('已下载，可以安装'),
     installing: () => T('正在安装…'),
+    installed: () => T('已安装，重启 PureVox 生效'),
     unsupported: () => T('本平台不支持自动更新'),
     failed: () => T('失败'),
   }
@@ -61,7 +62,7 @@
         (st.reason ? '：' + st.reason : '')
       state.textContent = txt
       state.className = st.phase === 'failed' || st.phase === 'unsupported' ? 'na'
-        : st.phase === 'available' || st.phase === 'ready' ? 'ok' : ''
+        : st.phase === 'available' || st.phase === 'ready' || st.phase === 'installed' ? 'ok' : ''
     }
 
     const notes = $('up-notes')
@@ -127,9 +128,11 @@
 
   function install() {
     invoke('update_install')
-      .then(() => {
-        // 安装器接管，进程很快退出；这里不必再刷状态
-        window.__pvDebug?.('已拉起安装器')
+      .then((msg) => {
+        // Windows：安装器接管，进程 1 s 后退出（界面来不及显示什么）；
+        // Linux：装完状态变 installed，刷新一次就能看到「重启生效」。
+        window.__pvDebug?.(typeof msg === 'string' ? msg : '已拉起安装器')
+        refresh()
       })
       .catch((e) => {
         window.__pvDebug?.('安装失败：' + e)
