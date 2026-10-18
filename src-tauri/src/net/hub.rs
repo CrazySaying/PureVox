@@ -101,7 +101,9 @@ impl SampleQueue {
 /// 硬顶（[`CAP_HOPS`]）由 `push` 兜住、目标（[`TARGET_HOPS`]）由这里慢慢拉回来。
 fn catchup(buf: &mut VecDeque<f32>, takes: &mut u64) -> u64 {
   *takes = takes.wrapping_add(1);
-  if *takes % CATCHUP_TAKES != 0 {
+  // 用 `is_multiple_of` 而不是 `% … != 0`：后者是 clippy 的 `manual_is_multiple_of`，
+  // 门禁带 `-D warnings`，会直接判失败。
+  if !(*takes).is_multiple_of(CATCHUP_TAKES) {
     return 0;
   }
   let target = TARGET_HOPS * HOP;

@@ -122,6 +122,12 @@ def gate_fmt() -> None:
 
 
 def gate_clippy() -> None:
+    # **先碰一下 crate 根，逼它重新编译一遍。**
+    # cargo 会把上一次 clippy 的产物判成 Fresh 直接复用，而 Fresh 时**一个警告都不会再打印** ——
+    # 于是「门禁绿」静默退化成「上次编译时是绿的」。本地缓存几乎总能命中，CI 干净树才暴露真相：
+    # 2026-10-18 实测，同一份代码本地报绿、CI 报 `manual_is_multiple_of`，白跑一轮发版。
+    # 只碰 crate 根：依赖仍是 Fresh（它们的 lint 本来也不报），代价就是本包重编一次。
+    (TAURI / "src" / "main.rs").touch()
     run(["cargo", "clippy", "--all-targets", "--", "-D", "warnings"], TAURI)
 
 
@@ -285,11 +291,16 @@ GATE_FUNCS = {
 def main() -> int:
     ap = argparse.ArgumentParser(description="PureVox 代码质量门禁")
     ap.add_argument(
-        "-Gate", default="all", choices=("all", *GATES),
-        help="跑哪几道门禁（默认 all）",
+        "-Gate", action="append", default=None, choices=("all", *GATES),
+        help="跑哪几道门禁，可重复（-Gate fmt -Gate clippy）；不带 = 全部",
     )
     args = ap.parse_args()
-    names = list(GATES) if args.Gate == "all" else [args.Gate]
+    # **可重复**：`-Gate` 原本是单值参数，串着写 `-Gate fmt -Gate clippy -Gate test` 只会跑最后一道 ——
+    # 「门禁全绿」于是静默退化成「只跑了 version / bundle」（2026-10-18 实测踩到，白跑一轮发版）。
+    # 另外把**实际要跑的清单**先打出来：日志被截断时也能一眼看出跑了几道。
+    want = args.Gate or ["all"]
+    names = list(GATES) if "all" in want else [g for g in GATES if g in set(want)]
+    print(f"门禁：{' '.join(names)}", flush=True)
 
     failed: list[str] = []
     for name in names:
@@ -303,7 +314,7 @@ def main() -> int:
     if failed:
         print(f"\n未通过：{', '.join(failed)}", file=sys.stderr)
         return 1
-    print(f"\n门禁全部通过（{args.Gate}）")
+    print(f"\n门禁全部通过（{', '.join(names)}）")
     return 0
 
 

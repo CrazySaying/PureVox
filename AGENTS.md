@@ -457,11 +457,15 @@ release 构建同样保留（不允许用编译开关剔除）。
    - **触发纪律**：**没有任何分支推送 / PR 触发**。`tests.yml`（只测试、不打包）只
      `workflow_dispatch` 手动触发；`release.yml`（打包发版）由 tag `v*` 触发、也可手动；
      `warm-cache.yml`（唯一缓存写入者）也只手动。日常提交零成本，要验证就手动 dispatch 一次。
-   - 门禁唯一实现 = `tools/automation/check.py`（**Python，跨平台唯一**：六道门禁 `fmt` /
-     `clippy`（`-D warnings`）/ `build` / `test` / `ui`（`tsc` + `i18n_lint`）/ `version`）。
-     选 Python 不选 PowerShell：门禁要跑 Windows / Linux / macOS 三边，pwsh 只有前两边装得像样
-     （CI runner 自带、本机还得自己搞），Python 三边都自带，冷启动 ~20 ms vs pwsh ~330 ms，
+   - 门禁唯一实现 = `tools/automation/check.py`（**Python，跨平台唯一**：七道门禁 `fmt` /
+     `clippy`（`-D warnings`）/ `build` / `test` / `ui`（`tsc` + `i18n_lint`）/ `version` /
+     `bundle`）。选 Python 不选 PowerShell：门禁要跑 Windows / Linux / macOS 三边，pwsh 只有前两边
+     装得像样（CI runner 自带、本机还得自己搞），Python 三边都自带，冷启动 ~20 ms vs pwsh ~330 ms，
      且只用标准库、不用 `pip install`。**CI 与本机跑同一份**（`-Gate` 拆 step 便于定位日志）。
+     **判门禁只看退出码，而且要确认跑了几道**（启动先打印实际清单）：`-Gate` 可重复、不带 = 全部，
+     少写一道不等于通过。`clippy` 那道会先碰 crate 根强制重编 —— cargo 命中缓存（Fresh）时
+     **不再重打任何警告**，「绿」于是静默退化成「上次编译时是绿的」（本机缓存几乎必中、
+     CI 干净树才暴露）。两条都是 2026-10-18 连挂两轮发版踩出来的。
    - 工作流（`.github/workflows/`）：
      - `tests.yml`：手动 → Rust 门禁矩阵 `windows-latest` + `ubuntu-24.04`
        （fmt/clippy/build/test）、`ui` 门禁（`ubuntu-24.04`：setup-node → `-Gate ui`）。**不打包**。
