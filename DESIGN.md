@@ -428,7 +428,7 @@ pub fn resolve(key: &str, kind: ModelKind) -> Option<&'static ModelDesc>;
 
 | 缓冲 | 位置 | 容量 / 策略 |
 | --- | --- | --- |
-| 采集回调 → 工作线程环 | `audio::capture`（rtrb） | 原生 500 ms；满则丢样并计数 |
+| 采集回调 → 工作线程环 | `audio::capture`（rtrb） | 原生 500 ms；满则丢样并计数；工作线程**按 10 ms 网格放行**（突发源如 `parec` 的整块先留在环里，只有下游水位不足或环积压 > 300 ms 才全速追平） |
 | 行输入环 | `engine` | 目标 2 hop，超 4 hop 丢最旧；空补静音 |
 | 输出扇出环 | `audio::fanout`（rtrb） | 1 s/订阅者；满则丢最旧 |
 | 源缓冲（输出侧） | `audio::playback` | 目标 40 ms，封顶 300 ms，超限丢最旧 |
@@ -440,7 +440,7 @@ pub fn resolve(key: &str, kind: ModelKind) -> Option<&'static ModelDesc>;
 | 回环历史 | `engine` | 1.5 s |
 | 音效板声部 | `engine` | 每个音效一段 48k/mono 样本（短音效整段入内存） |
 | 播放器环形缓冲 | `engine` | 3 s（48k f32），解码线程写、音频线程读，超限丢最旧 |
-| 网络 acc | `net/remote_mic` / `net/remote_speaker` | 进出各一环，目标 50 ms，硬顶 80 ms（超限丢最旧）；取不足一个 hop 补静音 |
+| 网络 acc | `net/remote_mic` / `net/remote_speaker` | 进出各一环，目标 50 ms，硬顶 80 ms（超限丢最旧）；水位超目标时按 1 s 丢 1 hop **慢慢收回目标**（推取同速、水位只靠硬顶回不来）；取不足一个 hop 补静音 |
 | 模型 `cache` | `infer` | 由模型决定（降噪 36506 / AEC 91920 / TSE 513216 f32），**每行一份** |
 
 规则：**音频回调零分配零加锁零日志**；工作线程预分配复用；任何进入数据面的容器都必须有上限与丢弃策略。

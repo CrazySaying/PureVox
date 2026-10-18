@@ -643,6 +643,8 @@ td { padding: 3px 8px 3px 0; overflow: hidden; text-overflow: ellipsis; }
 .na { color: var(--warn); }
 .pending { color: var(--muted); }
 .ok { color: var(--ok); }
+/* .warn = 结论/速率判定为「需要注意」（不是「测不到」，测不到用 .na） */
+.warn { color: var(--warn); }
 .err { color: var(--danger); }
 .state:empty { display: none; }
 

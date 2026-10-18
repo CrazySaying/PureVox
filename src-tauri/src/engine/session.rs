@@ -37,6 +37,7 @@ use super::stage::{FrameContext, Stage, StageError};
 use crate::audio::fanout::Fanout;
 use crate::audio::{HOP, WorkerHandle, capture, loopback, playback};
 use crate::debug::SharedHub;
+use crate::dsp::meter::RateMeter;
 use crate::infer::aec::Aec;
 use crate::plan::{ColumnSpec, Plan, RowKind};
 use crate::recorder::{Phase, RecorderHub};
@@ -63,6 +64,13 @@ struct Row {
   inf_max_ms: f32,
   /// 输入行：本行源的 48k hop 读端
   input: Option<Consumer<f32>>,
+  /// 输入行：行输入环累计丢弃的样本数（水位超 `ROW_CAP` 丢最旧）。
+  ///
+  /// 这个计数以前没有 ——源「一大块到达」时环被瞬间灌满、按策略丢最旧，**丢多少完全看不见**，
+  /// 用户看到的只是「声音规律地卡」（2026-10-18 实测：Linux 回环 100 ms 一块，每块丢掉大半）。
+  ring_dropped: u64,
+  /// 行输入环丢弃的实测速率（3 s 窗口；累计只涨不降，速率才看得出还在不在丢）
+  ring_drop_rate: RateMeter,
   /// 输入行（loopback）：行内增益（系统混音偏响，默认 -6 dB）
   gain: Option<f32>,
   /// AEC 输入行：mic 读端 + far 历史 + 本行模型状态
@@ -328,11 +336,32 @@ fn to_params(map: &BTreeMap<String, String>) -> Params {
 }
 
 /// 从行输入环取 1 hop（超上限丢最旧到目标）；不足一 hop 返回 false。
-fn take_hop(cons: &mut Consumer<f32>, out: &mut [f32; HOP]) -> bool {
+/// 行输入环丢弃注记（空串 = 没丢过）。
+///
+/// **丢了不报 = 只剩一句「声音卡」**：丢弃发生在 10 ms 网格之外，累计数只涨不降，
+/// 所以速率一起给（速率才看得出「现在还在不在丢」）。
+fn ring_drop_note(dropped: u64, rate: &crate::debug::Probe<f64>) -> String {
+  if dropped == 0 {
+    return String::new();
+  }
+  match rate {
+    crate::debug::Probe::Ok { value } => format!("，环丢 {dropped}（{value:.0}/s）"),
+    _ => format!("，环丢 {dropped}"),
+  }
+}
+
+/// 从行输入环取一个 hop。
+///
+/// 水位超过 [`ROW_CAP`] 就丢最旧、降到 [`ROW_TARGET`]（DESIGN.md §8）—— 顺带把丢了多少
+/// 报出来：丢样本发生在 10 ms 网格之外，**不报出来就只是一句「声音卡」**。
+/// 返回 `(是否取到 hop, 本轮丢弃的样本数)`。
+fn take_hop(cons: &mut Consumer<f32>, out: &mut [f32; HOP]) -> (bool, usize) {
+  let mut dropped = 0usize;
   if cons.slots() > ROW_CAP {
     let drop = cons.slots() - ROW_TARGET;
     if let Ok(c) = cons.read_chunk(drop) {
       c.commit_all();
+      dropped = drop;
     }
   }
   if cons.slots() >= HOP
@@ -342,9 +371,9 @@ fn take_hop(cons: &mut Consumer<f32>, out: &mut [f32; HOP]) -> bool {
     out[..a.len()].copy_from_slice(a);
     out[a.len()..].copy_from_slice(b);
     c.commit_all();
-    return true;
+    return (true, dropped);
   }
-  false
+  (false, dropped)
 }
 
 fn build_column(
@@ -375,6 +404,8 @@ fn build_column(
       gain: None,
       aec: None,
       net_input: None,
+      ring_dropped: 0,
+      ring_drop_rate: RateMeter::new(),
       stage: None,
       media_slot: None,
       output: None,
@@ -694,7 +725,9 @@ fn run_column(
           RowKind::Input => {
             if let Some(aec) = r.aec.as_mut() {
               // AEC 行：mic hop 与 far 窗口对齐后过模型；far 历史不足则直通 mic
-              if take_hop(&mut aec.mic, &mut tmp) {
+              let (got, dropped) = take_hop(&mut aec.mic, &mut tmp);
+              r.ring_dropped += dropped as u64;
+              if got {
                 // 会话起步：让 far 泵的时钟与 mic 序号同起点（否则两者相差设备打开时间，
                 // 校准会测出负延时且每次会话不同）；校准开始时代号变化 → 序号同样归零。
                 if aec_boot {
@@ -780,17 +813,19 @@ fn run_column(
               for i in 0..HOP {
                 acc[i] += tmp[i] * k;
               }
-            } else if let Some(cons) = r.input.as_mut()
-              && take_hop(cons, &mut tmp)
-            {
-              // 行内增益（loopback 源：系统混音偏响）
-              if let Some(g) = r.gain {
-                for x in tmp.iter_mut() {
-                  *x *= g;
+            } else if let Some(cons) = r.input.as_mut() {
+              let (got, dropped) = take_hop(cons, &mut tmp);
+              r.ring_dropped += dropped as u64;
+              if got {
+                // 行内增益（loopback 源：系统混音偏响）
+                if let Some(g) = r.gain {
+                  for x in tmp.iter_mut() {
+                    *x *= g;
+                  }
                 }
-              }
-              for i in 0..HOP {
-                acc[i] += tmp[i] * k;
+                for i in 0..HOP {
+                  acc[i] += tmp[i] * k;
+                }
               }
             }
           }
@@ -836,6 +871,9 @@ fn run_column(
 
       let now = Instant::now();
       if now.duration_since(last_publish) >= PUBLISH {
+        // 速率要按**实测**间隔算：拿固定 PUBLISH 去除，publish 偶尔晚一拍就会报出 105 hop/s
+        // （2026-10-18 实测：同一段会话里 100 / 105 交替出现 —— 是量法的问题，不是节拍的问题）
+        let elapsed = now.duration_since(last_publish).as_secs_f64().max(1e-3);
         last_publish = now;
         let n_in = g
           .iter()
@@ -852,7 +890,7 @@ fn run_column(
         let unconf = g.iter().filter(|r| r.unconfigured).count();
         let errs = g.iter().filter(|r| r.error.is_some()).count();
         let mut s = format!("列 {}：输入 {n_in}，处理 {n_proc}，输出 {n_out}", idx + 1);
-        let rate = (ticks - last_ticks) as f64 / PUBLISH.as_secs_f64();
+        let rate = (ticks - last_ticks) as f64 / elapsed;
         last_ticks = ticks;
         s.push_str(&format!("，{rate:.0} hop/s"));
         if unconf > 0 {
@@ -861,9 +899,10 @@ fn run_column(
         if errs > 0 {
           s.push_str(&format!("，异常 {errs}"));
         }
-        // 行状态：处理行（模型/参考 + 推理耗时）、AEC 行（对齐/延时），进调试接口便于观测
+        // 行状态：处理行（模型/参考 + 推理耗时）、AEC 行（对齐/延时）、输入行（环水位/丢弃），
+        // 进调试接口便于观测
         let mut notes: Vec<String> = Vec::new();
-        for r in g.iter() {
+        for r in g.iter_mut() {
           // 失败的行必须把原因带出来（AGENTS.md：不静默失败；否则只能看到「异常 N」无从定位）
           if let Some(e) = r.error.as_ref() {
             notes.push(format!("⚠ {}：{e}", r.label));
@@ -882,8 +921,9 @@ fn run_column(
           } else if let Some(aec) = r.aec.as_ref() {
             let ftotal = aec.hist.lock().map(|h| h.total()).unwrap_or(0);
             let mic_idx = aec.mic_hops * crate::audio::HOP as u64;
+            let rate = r.ring_drop_rate.push(now, r.ring_dropped);
             notes.push(format!(
-              "{}：精确 {}，回退 {}，直通 {}，延时 {} ms ｜ 远端解释度 ρ={:.2}，回声抑制 {:.1} dB ｜ 网格 far={} mic={}（差 {}）",
+              "{}：精确 {}，回退 {}，直通 {}，延时 {} ms ｜ 远端解释度 ρ={:.2}，回声抑制 {:.1} dB ｜ 网格 far={} mic={}（差 {}）{}",
               r.label,
               aec.exact,
               aec.latest,
@@ -893,7 +933,8 @@ fn run_column(
               aec.echo.supp_db,
               ftotal,
               mic_idx,
-              mic_idx as i64 - ftotal as i64
+              mic_idx as i64 - ftotal as i64,
+              ring_drop_note(r.ring_dropped, &rate)
             ));
           } else if let Some(net) = r.net_input.as_ref() {
             // 网络行状态：入站水位与欠载，便于判断「手机没在说话」还是「缓冲欠载」
@@ -912,6 +953,16 @@ fn run_column(
               r.label,
               crate::net::hub().stats().tx_packets,
               crate::net::hub().sub_count()
+            ));
+          } else if let Some(cons) = r.input.as_mut() {
+            // 输入环水位：源「一大块到达」（Linux 回环 100 ms 一块）时，水位会周期性顶到
+            // ROW_CAP 再掉到 0 —— 掉到 0 就是列这一拍取不到数据（补静音），听感是规律地卡。
+            let ms = cons.slots() as f64 / crate::audio::SAMPLE_RATE as f64 * 1000.0;
+            let rate = r.ring_drop_rate.push(now, r.ring_dropped);
+            notes.push(format!(
+              "{}：输入环 {ms:.0} ms{}",
+              r.label,
+              ring_drop_note(r.ring_dropped, &rate)
             ));
           }
         }

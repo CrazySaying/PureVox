@@ -282,6 +282,31 @@
                     android:textColor="?android:attr/textColorSecondary"
                     android:textSize="12sp" />
 
+                <!-- 常驻通知状态：挂了 / 没挂上（带原因）。看不见的「保活没生效」= 没有保活 -->
+                <TextView
+                    android:id="@+id/tvKeepalive"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:text="@string/keepalive_notif_off"
+                    android:textSize="12sp" />
+
+                <!-- 通知权限（Android 13+）：没允许就没通知；一旦拒过，弹窗不会再出现，只能去设置 -->
+                <TextView
+                    android:id="@+id/tvNotifPerm"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/notif_perm_unknown"
+                    android:textSize="12sp" />
+
+                <Button
+                    android:id="@+id/btnNotifSettings"
+                    style="@style/PvButton.Outlined"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/btn_notif_settings" />
+
                 <TextView
                     android:id="@+id/tvBattery"
                     android:layout_width="match_parent"

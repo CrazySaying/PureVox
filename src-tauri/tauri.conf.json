@@ -50,10 +50,10 @@
           "libgcc-s1",
           "libc6"
         ],
-        "recommends": ["libopus0"]
+        "recommends": ["libopus0", "pulseaudio-utils"]
       },
       "rpm": {
-        "recommends": ["opus"]
+        "recommends": ["opus", "pulseaudio-utils"]
       }
     }
   }

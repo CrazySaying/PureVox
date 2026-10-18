@@ -37,15 +37,17 @@ pub fn play(pcm: &[f32], target: Option<&str>) -> Result<(), String> {
       "--format=float32le",
       "--rate=48000",
       "--channels=1",
-      // 与 far 采集同样压低缓冲：探针要立刻出现在 far 的采集里
-      "--latency-msec=100",
-      "--process-time-msec=20",
+      // 与 far 采集同样压低缓冲：探针要立刻出现在 far 的采集里。
+      // 值直接复用回环那套（[`crate::audio::loopback::PARE_LATENCY_MS`]）—— 两处是同一个
+      // 「这一路的固定延迟下限」问题，分开写两个常量必然漂移。
+      &format!("--latency-msec={}", crate::audio::loopback::PARE_LATENCY_MS),
+      &format!("--process-time-msec={}", crate::audio::loopback::PARE_PROCESS_MS),
     ])
     .stdin(Stdio::piped())
     .stdout(Stdio::null())
     .stderr(Stdio::null())
     .spawn()
-    .map_err(|e| format!("启动 pacat 失败（需要 PulseAudio/PipeWire）：{e}"))?;
+    .map_err(|e| format!("启动 pacat 失败：{e}（{}）", crate::audio::PULSE_TOOLS_HINT))?;
   {
     let mut stdin = child.stdin.take().ok_or("pacat 未提供 stdin")?;
     let mut bytes = Vec::with_capacity(pcm.len() * 4);

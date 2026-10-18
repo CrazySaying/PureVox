@@ -54,6 +54,34 @@ impl<T> Probe<T> {
   }
 }
 
+/// 一路流 / 整个音频引擎的体检结论。
+///
+/// `level` 只用来着色（`ok` / `warn`），`text` 是人话结论且**必须带关键数字** ——
+/// 「稳定」和「稳定（设备侧 48000 Hz，无丢弃）」的信息量差一个数量级。
+/// 判定统一在 [`crate::audio::health`] 里做一处，面板与 HTTP 接口渲染同一份
+/// （AGENTS.md 1.3「单一数据源」；前端禁止自己另算一套）。
+#[derive(Clone, Debug, Serialize)]
+pub struct Health {
+  /// `ok` = 正常；`warn` = 需要看一眼（面板着黄）
+  pub level: &'static str,
+  pub text: String,
+}
+
+impl Health {
+  pub fn ok(text: impl Into<String>) -> Self {
+    Health {
+      level: "ok",
+      text: text.into(),
+    }
+  }
+  pub fn warn(text: impl Into<String>) -> Self {
+    Health {
+      level: "warn",
+      text: text.into(),
+    }
+  }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct AppInfo {
   pub name: &'static str,
@@ -72,6 +100,8 @@ pub struct StreamInfo {
   pub device_name: String,
   /// running / 不可用 + 错误原因
   pub state: Probe<String>,
+  /// 健康结论：把下面的计数与速率翻成一句人话（含关键数字），由 `audio::health` 判定
+  pub health: Probe<Health>,
   pub started_at: u64,
   /// 输出流播放的信号源名称；输入流为 None
   pub source: Option<String>,
@@ -111,6 +141,13 @@ pub struct StreamInfo {
   /// 输出流：信号源断流后静音并重新预热的次数
   pub resyncs: Probe<u64>,
   pub stream_errors: u64,
+  /// 上面几个计数的实测速率（次/秒，3 s 滑动窗口）：累计值只会越涨越大，
+  /// 单看它永远看不出「现在稳不稳」——速率与结论要一起看。没数据时为采集中。
+  /// 与计数同名同义：输入流的欠载/重同步本就不适用，速率也给不可用 + 原因。
+  pub underrun_per_s: Probe<f64>,
+  pub resync_per_s: Probe<f64>,
+  pub overrun_per_s: Probe<f64>,
+  pub stream_error_per_s: Probe<f64>,
   pub last_error: Option<String>,
   /// 输入流：回调 → 工作线程环形缓冲水位；输出流：48k 源缓冲水位（伺服目标 40 ms）
   pub buffer_level_ms: f32,
@@ -129,6 +166,8 @@ pub struct StreamInfo {
 #[derive(Clone, Debug, Serialize)]
 pub struct AudioInfo {
   pub engine: Probe<String>,
+  /// 全部流的汇总结论（最坏优先）：一眼看出「整个音频链路现在有没有问题」
+  pub verdict: Probe<Health>,
   pub streams: Vec<StreamInfo>,
 }
 
@@ -284,6 +323,7 @@ impl DebugHub {
       _ => Probe::unavailable("列未启动"),
     };
     let streams: Vec<StreamInfo> = st.streams.into_values().collect();
+    let verdict = crate::audio::health::overall(&streams);
     DebugSnapshot {
       ts: now_ms(),
       uptime_ms: self.uptime_ms(),
@@ -294,7 +334,11 @@ impl DebugHub {
         debug_http: st.http,
       },
       system: st.system,
-      audio: AudioInfo { engine, streams },
+      audio: AudioInfo {
+        engine,
+        verdict,
+        streams,
+      },
       devices,
       ui: st_ui,
       running: st_running,

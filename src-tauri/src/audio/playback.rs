@@ -230,6 +230,10 @@ fn run(
   let mut meter = Meter::new();
   let mut in_rate = RateMeter::new();
   let mut out_rate = RateMeter::new();
+  let mut undr_rate = RateMeter::new();
+  let mut resync_rate = RateMeter::new();
+  let mut drop_rate = RateMeter::new();
+  let mut err_rate = RateMeter::new();
   let mut stall = StallWatch::new();
   let mut servo = Servo::new();
   let mut prewarm = true;
@@ -327,12 +331,15 @@ fn run(
         Probe::ok("running".to_string())
       };
       let dev_level = (dev_cap - dev_prod.slots()) as f32 * 1000.0 / dev_rate as f32;
-      hub.set_stream(StreamInfo {
+      let underruns = stats.xruns.load(Relaxed);
+      let errors = stats.errors.load(Relaxed);
+      let mut st = StreamInfo {
         id: stream_id.clone(),
         direction: "output",
         device_id: device_id.clone(),
         device_name: name.clone(),
         state,
+        health: Probe::Pending, // 下面 health::annotate 会按 state + 计数/速率填上
         started_at,
         source: Some(source.name().to_string()),
         denoise: Probe::unavailable("输出流不适用（降噪在输入侧）"),
@@ -353,10 +360,14 @@ fn run(
         pending_frames: 0,
         peak_dbfs: m.peak_dbfs,
         rms_dbfs: m.rms_dbfs,
-        underruns: Probe::ok(stats.xruns.load(Relaxed)),
+        underruns: Probe::ok(underruns),
         overruns: dropped,
         resyncs: Probe::ok(resyncs),
-        stream_errors: stats.errors.load(Relaxed),
+        stream_errors: errors,
+        underrun_per_s: undr_rate.push(now, underruns),
+        resync_per_s: resync_rate.push(now, resyncs),
+        overrun_per_s: drop_rate.push(now, dropped),
+        stream_error_per_s: err_rate.push(now, errors),
         last_error,
         buffer_level_ms: src.slots() as f32 * 1000.0 / SAMPLE_RATE as f32,
         device_buffer_ms: Probe::ok(dev_level),
@@ -366,7 +377,9 @@ fn run(
         waveform: m.waveform,
         spectrum_db: m.spectrum_db,
         spectrum_bin_hz: SPECTRUM_BIN_HZ,
-      });
+      };
+      super::health::annotate(&mut st);
+      hub.set_stream(st);
     }
     std::thread::sleep(POLL_PERIOD);
   }

@@ -26,18 +26,40 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use crate::audio::{HOP, SAMPLE_RATE};
+use crate::dsp::meter::RateMeter;
 
-/// 出站队列上限（hop 数）：8 hop = 80 ms。
-const OUT_CAP_HOPS: usize = 8;
-/// 入站队列上限（样本）：80 ms。
-const IN_CAP: usize = SAMPLE_RATE as usize / 100 * 80;
+/// 两个方向队列的**硬顶**（hop 数）：8 hop = 80 ms。
+const CAP_HOPS: usize = 8;
+/// 两个方向队列的**目标水位**（hop 数）：5 hop = 50 ms（DESIGN.md §4.1）。
+///
+/// 为什么光有硬顶不够：两个方向的「生产」与「消费」都是**各自的 10 ms 定时器**
+/// （列工作线程 / 出站编码任务 / 手机端），速率几乎相等但不完全相等，水位因此是
+/// **随机游走**：一旦因为某次停顿涨上去（最典型的是**会话重建** —— 换列、改设备、
+/// 打开设备重试最长 3 s，这段时间没人取、手机却一直在推），之后取速率与推速率相同，
+/// **水位再也降不下来**。实测（2026-10-18）：手机麦克风本该 10~50 ms，加一列之后
+/// 一直拖 230 ms ——「一开电脑声音串流麦克风就变延迟」的真实原因不是串流本身，
+/// 而是**每次重建都会把水位垫高一截**。
+///
+/// 所以取的时候要**慢慢把水位拉回目标**：每 [`CATCHUP_TAKES`] 次取、且水位超目标时，
+/// 多丢 1 个 hop（= 1 s 丢 10 ms）。只有超出目标时才发生，听感是偶发的一跳，
+/// 换回来的是**稳定在目标附近**的延迟。
+const TARGET_HOPS: usize = 5;
+/// 收敛节拍：每取这么多次检查一次水位（100 × 10 ms = 1 s）。
+const CATCHUP_TAKES: u64 = 100;
+/// 入站队列上限（样本数）。**必须由 hop 派生**：早先写成
+/// `SAMPLE_RATE / 100 * 80` = 38400 样本 = **800 ms**（本意是 80 ms，差 10 倍），
+/// 于是水位可以在 800 ms 内随便涨，配合上一条的「降不下来」= 永久延迟。
+const IN_CAP: usize = CAP_HOPS * HOP;
 
 /// 入站样本队列（手机 → 电脑）。多生产者（多个连接）、单消费者（一列的 `remote_mic` 行）。
 #[derive(Default, Debug)]
 pub struct SampleQueue {
   buf: VecDeque<f32>,
+  /// 取了多少次（收敛节拍用）
+  takes: u64,
 }
 
 impl SampleQueue {
@@ -52,16 +74,19 @@ impl SampleQueue {
     dropped
   }
 
-  /// 取一个 hop；不足返回 false（调用方补静音）。
-  pub fn take_hop(&mut self, out: &mut [f32]) -> bool {
+  /// 取一个 hop；不足返回 `(false, 丢弃数)`（调用方补静音）。
+  ///
+  /// 返回的第二个值是为**收敛水位**而丢掉的样本（见 [`catchup`]），调用方计入丢弃统计。
+  pub fn take_hop(&mut self, out: &mut [f32]) -> (bool, u64) {
+    let dropped = catchup(&mut self.buf, &mut self.takes);
     if self.buf.len() < out.len() {
-      return false;
+      return (false, dropped);
     }
     for (i, slot) in out.iter_mut().enumerate() {
       *slot = self.buf[i];
     }
     self.buf.drain(..out.len());
-    true
+    (true, dropped)
   }
 
   /// 水位（样本数），进调试接口。
@@ -70,32 +95,55 @@ impl SampleQueue {
   }
 }
 
+/// 队列收敛：每次取之前调用一次。水位超过目标时，按 [`CATCHUP_TAKES`] 节拍多丢 1 个 hop。
+///
+/// 返回本次为收敛丢掉的最旧样本数（0 = 没丢）。两个方向共用同一套策略：
+/// 硬顶（[`CAP_HOPS`]）由 `push` 兜住、目标（[`TARGET_HOPS`]）由这里慢慢拉回来。
+fn catchup(buf: &mut VecDeque<f32>, takes: &mut u64) -> u64 {
+  *takes = takes.wrapping_add(1);
+  if *takes % CATCHUP_TAKES != 0 {
+    return 0;
+  }
+  let target = TARGET_HOPS * HOP;
+  if buf.len() <= target {
+    return 0;
+  }
+  let drop = HOP.min(buf.len() - target);
+  for _ in 0..drop {
+    buf.pop_front();
+  }
+  drop as u64
+}
+
 /// 出站 hop 队列（电脑 → 手机）：一订阅者一条。
 #[derive(Default)]
 struct HopQueue {
   buf: VecDeque<f32>,
+  /// 取了多少次（收敛节拍用）
+  takes: u64,
 }
 
 impl HopQueue {
   fn push(&mut self, hop: &[f32]) -> u64 {
     self.buf.extend(hop.iter().copied());
     let mut dropped = 0u64;
-    while self.buf.len() > OUT_CAP_HOPS * HOP {
+    while self.buf.len() > CAP_HOPS * HOP {
       self.buf.pop_front();
       dropped += 1;
     }
     dropped
   }
 
-  fn take_hop(&mut self, out: &mut [f32]) -> bool {
+  fn take_hop(&mut self, out: &mut [f32]) -> (bool, u64) {
+    let dropped = catchup(&mut self.buf, &mut self.takes);
     if self.buf.len() < out.len() {
-      return false;
+      return (false, dropped);
     }
     for (i, slot) in out.iter_mut().enumerate() {
       *slot = self.buf[i];
     }
     self.buf.drain(..out.len());
-    true
+    (true, dropped)
   }
 
   fn level(&self) -> usize {
@@ -106,12 +154,18 @@ impl HopQueue {
 /// 一个订阅者的句柄（连接任务持有）。
 pub struct OutboundSub {
   q: Arc<Mutex<HopQueue>>,
+  /// 该订阅者累计被丢掉的样本（超硬顶 + 收敛；进调试接口）
+  dropped: Arc<AtomicU64>,
 }
 
 impl OutboundSub {
   /// 取一个 hop 准备发送；欠载返回 false（发送静音包，保持时钟不断）。
   pub fn take_hop(&self, out: &mut [f32]) -> bool {
-    self.q.lock().unwrap().take_hop(out)
+    let (got, dropped) = self.q.lock().unwrap().take_hop(out);
+    if dropped > 0 {
+      self.dropped.fetch_add(dropped, Relaxed);
+    }
+    got
   }
 }
 
@@ -125,8 +179,15 @@ impl Outbound {
   fn subscribe(&self) -> (u64, OutboundSub) {
     let id = self.next_id.fetch_add(1, Relaxed);
     let q = Arc::new(Mutex::new(HopQueue::default()));
+    let dropped = Arc::new(AtomicU64::new(0));
     self.subs.lock().unwrap().push((id, q.clone()));
-    (id, OutboundSub { q })
+    (
+      id,
+      OutboundSub {
+        q,
+        dropped,
+      },
+    )
   }
 
   fn unsubscribe(&self, id: u64) {
@@ -151,11 +212,27 @@ impl Outbound {
   }
 }
 
+/// 一路出站订阅（一个客户端）的即时状态。
+///
+/// 为什么要**逐路**报：`tx_level` 是几路订阅的合计数，两路订阅（一路正常的手机 + 一路
+/// 连过但没在取数据的客户端）合起来只看得到一个数字 ——「是谁在拖」看不出来。
+/// 实测（2026-10-18）：一路顶格的订阅每推一 hop 就丢一 hop，丢样本速率等于整条音频的
+/// 生产速率（≈ 48 kHz），另一路正常的订阅其实一点没丢。合计数会把人引到错误的方向。
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct TxSubStat {
+  /// 队列水位（ms）：客户端取走之前攒了多少 = 该客户端的额外时延
+  pub level_ms: f32,
+  /// 是否顶格（`tx_cap_ms` 上限）——顶格就是「这个客户端没在取数据」
+  pub full: bool,
+}
+
 /// 网络统计（进调试接口 `/debug` 的 `net` 段）。
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct NetStats {
   /// WebSocket 监听端口
   pub port: u16,
+  /// 服务是否在监听（界面顶栏的开关状态；不在监听时下面那些数都是上一次的）
+  pub running: bool,
   /// 已连接客户端数
   pub clients: usize,
   /// 已订阅电脑音频的客户端数
@@ -178,6 +255,22 @@ pub struct NetStats {
   pub tx_level: usize,
   /// 电脑 → 手机：因超出 80 ms 上限丢弃的样本数
   pub tx_dropped: u64,
+  /// 电脑 → 手机：列工作线程累计推给客户端的 hop 数（= 0 说明没有一行「网络扬声器」在送信号）
+  pub tx_hops: u64,
+  /// 电脑 → 手机：每路订阅分别的水位（合计数看不出是谁在拖，见 [`TxSubStat`]）
+  pub tx_subs: Vec<TxSubStat>,
+  /// 电脑 → 手机：出站队列硬顶（ms）
+  pub tx_cap_ms: f32,
+  /// 出站结论（Rust 侧单一判定，面板与 HTTP 接口渲染同一份）
+  pub verdict: crate::debug::Health,
+  /// 电脑 → 手机：发出 Opus 包的实测速率（包/s，3 s 窗口）
+  pub tx_packets_per_s: crate::debug::Probe<f64>,
+  /// 手机 → 电脑：收到 Opus 包的实测速率（包/s，3 s 窗口）
+  pub rx_packets_per_s: crate::debug::Probe<f64>,
+  /// 电脑 → 手机：出站丢弃的实测速率（样本/s，3 s 窗口）
+  pub tx_dropped_per_s: crate::debug::Probe<f64>,
+  /// 手机 → 电脑：入站丢弃的实测速率（样本/s，3 s 窗口）
+  pub rx_dropped_per_s: crate::debug::Probe<f64>,
   /// 已注入的按键事件数
   pub keys_injected: u64,
   /// 未映射而忽略的手机按键数
@@ -200,6 +293,7 @@ impl Default for NetStats {
   fn default() -> Self {
     NetStats {
       port: crate::net::proto::PORT,
+      running: false,
       clients: 0,
       subs: 0,
       rx_packets: 0,
@@ -211,6 +305,14 @@ impl Default for NetStats {
       tx_packets: 0,
       tx_level: 0,
       tx_dropped: 0,
+      tx_hops: 0,
+      tx_subs: Vec::new(),
+      tx_cap_ms: tx_cap_ms(),
+      verdict: crate::debug::Health::ok("网络服务未启动"),
+      tx_packets_per_s: crate::debug::Probe::Pending,
+      rx_packets_per_s: crate::debug::Probe::Pending,
+      tx_dropped_per_s: crate::debug::Probe::Pending,
+      rx_dropped_per_s: crate::debug::Probe::Pending,
       keys_injected: 0,
       keys_unmapped: 0,
       chars_typed: 0,
@@ -219,6 +321,33 @@ impl Default for NetStats {
       last_error: None,
       codec: crate::debug::Probe::Pending,
       client_caps: None,
+    }
+  }
+}
+
+/// 出站队列硬顶（ms）：hop = 10 ms，与 `CAP_HOPS` 同源。
+fn tx_cap_ms() -> f32 {
+  (CAP_HOPS * HOP) as f32 * 1000.0 / SAMPLE_RATE as f32
+}
+
+/// 速率窗口：`stats()` 每次推进一格（3 s 窗口，见 [`RateMeter`]）。
+///
+/// 放在中枢里而不是调试层：`/health` 与列概要也会调 `stats()`，多一个采样点只会让
+/// 窗口更密；窗口太短时 `RateMeter` 自己报 `pending`（界面显示「采集中…」，不编数字）。
+struct NetRates {
+  rx_packets: RateMeter,
+  tx_packets: RateMeter,
+  rx_dropped: RateMeter,
+  tx_dropped: RateMeter,
+}
+
+impl NetRates {
+  fn new() -> Self {
+    NetRates {
+      rx_packets: RateMeter::new(),
+      tx_packets: RateMeter::new(),
+      rx_dropped: RateMeter::new(),
+      tx_dropped: RateMeter::new(),
     }
   }
 }
@@ -250,6 +379,8 @@ pub struct NetHub {
   ca_pem: Mutex<Option<String>>,
   /// 最近一个网页版客户端上报的浏览器能力
   client_caps: Mutex<Option<String>>,
+  /// 进出包 / 丢样本的实测速率（见 [`NetRates`]）
+  rates: Mutex<NetRates>,
 }
 
 impl Default for NetHub {
@@ -274,6 +405,7 @@ impl NetHub {
       port: AtomicU16::new(crate::net::proto::PORT),
       ca_pem: Mutex::new(None),
       client_caps: Mutex::new(None),
+      rates: Mutex::new(NetRates::new()),
     }
   }
 
@@ -343,7 +475,7 @@ impl NetHub {
 
   /// 列工作线程（`remote_mic` 行）：按 10 ms 节拍取一个 hop；欠载补静音并计数。
   pub fn take_rx_hop(&self, out: &mut [f32]) {
-    let got = self.inbound.lock().unwrap().take_hop(out);
+    let (got, dropped) = self.inbound.lock().unwrap().take_hop(out);
     let mut s = self.stats.lock().unwrap();
     if got {
       s.rx_hops += 1;
@@ -351,6 +483,7 @@ impl NetHub {
       out.fill(0.0);
       s.rx_underruns += 1;
     }
+    s.rx_dropped += dropped;
     s.rx_level = self.inbound.lock().unwrap().level();
   }
 
@@ -442,16 +575,80 @@ impl NetHub {
     self.stats.lock().unwrap().chars_typed += n as u64;
   }
 
+  /// 逐路出站订阅水位（见 [`TxSubStat`]）。
+  fn tx_sub_stats(&self) -> Vec<TxSubStat> {
+    let cap = CAP_HOPS * HOP;
+    self
+      .outbound
+      .subs
+      .lock()
+      .unwrap()
+      .iter()
+      .map(|(_, q)| {
+        let lv = q.lock().unwrap().level();
+        TxSubStat {
+          level_ms: lv as f32 * 1000.0 / SAMPLE_RATE as f32,
+          full: lv >= cap,
+        }
+      })
+      .collect()
+  }
+
+  /// 出站结论：把「几路订阅 / 谁顶格 / 丢了多少 / 到底有没有在推」翻成一句人话。
+  ///
+  /// 单一判定处（面板与 HTTP 接口渲染同一份），与音频流的 `health` 同一个思路。
+  fn tx_verdict(&self, subs: &[TxSubStat], dropped: u64, hops: u64) -> crate::debug::Health {
+    let cap = tx_cap_ms();
+    if subs.is_empty() {
+      return crate::debug::Health::ok(
+        "没有客户端在收电脑音频（「网络扬声器」那一行还没有订阅者）",
+      );
+    }
+    if hops == 0 {
+      return crate::debug::Health::warn(format!(
+        "{} 路订阅，但还没有音频推给客户端（「网络扬声器」那一行没接上信号）",
+        subs.len()
+      ));
+    }
+    let full = subs.iter().filter(|s| s.full).count();
+    if full > 0 {
+      return crate::debug::Health::warn(format!(
+        "{} 路订阅里 {} 路顶格（上限 {cap:.0} ms，累计丢 {dropped} 个样本）：这个客户端没在取数据，把它换到前台或断开",
+        subs.len(),
+        full
+      ));
+    }
+    let max = subs.iter().map(|s| s.level_ms).fold(0.0f32, f32::max);
+    crate::debug::Health::ok(format!(
+      "{} 路订阅正常：水位最大 {max:.0} ms（上限 {cap:.0} ms）",
+      subs.len()
+    ))
+  }
+
   /// 调试快照用的统计克隆（同时带上 opus 库探测）。
   pub fn stats(&self) -> NetStats {
     let mut s = self.stats.lock().unwrap().clone();
     // 端口报「下次会绑的那个」：服务没开时这就是用户填的值，比报常量有用
     s.port = self.port();
+    s.running = self.is_running();
     s.subs = self.sub_count();
     s.rx_level = self.rx_level();
     s.remote_input = self.remote_input();
     s.tx_dropped = self.outbound.dropped.load(Relaxed);
     s.tx_level = self.tx_level();
+    s.tx_hops = self.tx_last.lock().map(|v| v.1).unwrap_or(0);
+    s.tx_cap_ms = tx_cap_ms();
+    let subs = self.tx_sub_stats();
+    s.verdict = self.tx_verdict(&subs, s.tx_dropped, s.tx_hops);
+    s.tx_subs = subs;
+    {
+      let now = Instant::now();
+      let mut r = self.rates.lock().unwrap_or_else(|e| e.into_inner());
+      s.rx_packets_per_s = r.rx_packets.push(now, s.rx_packets);
+      s.tx_packets_per_s = r.tx_packets.push(now, s.tx_packets);
+      s.rx_dropped_per_s = r.rx_dropped.push(now, s.rx_dropped);
+      s.tx_dropped_per_s = r.tx_dropped.push(now, s.tx_dropped);
+    }
     s.codec = match super::opus_sys::probe() {
       Ok(v) => {
         let path = super::opus_sys::loaded_path().unwrap_or_default();
@@ -474,14 +671,14 @@ mod tests {
     let mut hop = [0.0f32; HOP];
     // 不满一个 hop 时不返回
     q.push(&[1.0; 100]);
-    assert!(!q.take_hop(&mut hop));
+    assert!(!q.take_hop(&mut hop).0);
     // 补足后正好出一个 hop
     q.push(&[2.0; HOP - 100]);
-    assert!(q.take_hop(&mut hop));
+    assert!(q.take_hop(&mut hop).0);
     // 前 100 个是 1.0（新追加的部分），其余 380 个是 2.0
     assert!(hop[..100].iter().all(|x| *x == 1.0), "旧样本应原样保留");
     assert!(hop[100..].iter().all(|x| *x == 2.0), "新样本应接在后面");
-    assert!(!q.take_hop(&mut hop));
+    assert!(!q.take_hop(&mut hop).0);
   }
 
   #[test]
@@ -491,9 +688,99 @@ mod tests {
     assert_eq!(dropped, 1000);
     assert_eq!(q.level(), IN_CAP);
     let mut hop = [0.0f32; HOP];
-    assert!(q.take_hop(&mut hop));
+    assert!(q.take_hop(&mut hop).0);
     // 丢的是最旧的：剩下的全是新值
     assert!(hop.iter().all(|x| *x == 7.0));
+  }
+
+  /// 硬顶必须由 hop 派生：曾经写成 `SAMPLE_RATE / 100 * 80` = 38400 样本 = 800 ms
+  /// （本意 80 ms），水位能在 800 ms 内随便涨 —— 手机麦克风「永久延迟」的直接原因。
+  #[test]
+  fn inbound_cap_is_eighty_ms() {
+    assert_eq!(IN_CAP, 3840, "上限 = 8 hop = 80 ms");
+    assert_eq!(IN_CAP * 1000 / SAMPLE_RATE as usize, 80);
+  }
+
+  /// 水位超目标时**慢慢**拉回目标：每 1 s 多丢 1 个 hop，不是一次性砍掉。
+  /// 这是「会话重建把水位垫高之后还能降回来」的唯一机制（2026-10-18）。
+  #[test]
+  fn outbound_queue_catches_up_to_target() {
+    let hub = NetHub::new();
+    let (_id, sub) = hub.subscribe_tx();
+    // 先垫到一个「重建之后」的水位：硬顶（8 hop）
+    let hop = [1.0f32; HOP];
+    for _ in 0..CAP_HOPS {
+      hub.push_tx_hop(&hop);
+    }
+    assert_eq!(hub.stats().tx_level, CAP_HOPS * HOP);
+    // 模拟实时流：每次取之前推 1 个 hop，水位本应恒定
+    let mut out = [0.0f32; HOP];
+    for i in 0..(CATCHUP_TAKES * 3) {
+      hub.push_tx_hop(&hop);
+      assert!(sub.take_hop(&mut out));
+      let _ = i;
+    }
+    let lv = hub.stats().tx_level;
+    assert!(
+      lv <= TARGET_HOPS * HOP,
+      "3 s 后水位应回到目标以内，实测 {lv} 样本"
+    );
+    assert!(hub.stats().tx_dropped >= HOP as u64, "收敛丢弃要计入统计");
+  }
+
+  /// 用户实测场景（2026-10-18）：「**只要再开一列**麦克风就变延迟」。
+  ///
+  /// 机制：加列 = 会话重建 → 这段时间没有行在取，而手机一直在推 → 水位一次性垫高，
+  /// 重建后推速 = 取速，**水位再也降不回来**（实测一直是 800 ms 硬顶：`rx_level` 38400）。
+  /// 修复：超硬顶立刻裁到硬顶，之后按 1 s 1 hop 收回目标；水位在目标以内一点不丢。
+  #[test]
+  fn inbound_recovers_after_session_rebuild() {
+    let hub = NetHub::new();
+    // 重建期间 3 s 没人取（手机照推）
+    for _ in 0..300 {
+      hub.push_rx(&[1.0; HOP]);
+    }
+    assert_eq!(
+      hub.stats().rx_level,
+      CAP_HOPS * HOP,
+      "超硬顶立刻裁到硬顶（不再允许涨到 800 ms）"
+    );
+    // 重建完：取 1 推 1 的实时流
+    let mut out = [0.0f32; HOP];
+    let mut silent = 0;
+    for _ in 0..(CATCHUP_TAKES * 4) {
+      hub.push_rx(&[1.0; HOP]);
+      hub.take_rx_hop(&mut out);
+      if out.iter().all(|x| *x == 0.0) {
+        silent += 1;
+      }
+    }
+    let s = hub.stats();
+    assert_eq!(silent, 0, "水位一直在目标之上，不该补静音");
+    assert!(
+      s.rx_level <= TARGET_HOPS * HOP,
+      "4 s 内水位应回到目标以内，实测 {} 样本",
+      s.rx_level
+    );
+    assert!(
+      s.rx_dropped >= (CAP_HOPS - TARGET_HOPS) as u64 * HOP as u64,
+      "收回目标的丢弃要计入统计（面板上看得到）"
+    );
+  }
+
+  /// 水位在目标以内时**一点都不许丢**（收敛只在超出目标时发生）。
+  #[test]
+  fn queue_does_not_drop_below_target() {
+    let mut q = SampleQueue::default();
+    let mut out = [0.0f32; HOP];
+    let mut dropped = 0u64;
+    for _ in 0..(CATCHUP_TAKES * 2) {
+      q.push(&[0.5; HOP]); // 推 1 取 1：水位恒为 1 hop（< 目标）
+      let (got, d) = q.take_hop(&mut out);
+      assert!(got);
+      dropped += d;
+    }
+    assert_eq!(dropped, 0, "水位没超目标就不该丢样本");
   }
 
   #[test]
@@ -501,11 +788,11 @@ mod tests {
     let hub = NetHub::new();
     let (_id, sub) = hub.subscribe_tx();
     let hop = [1.0f32; HOP];
-    for _ in 0..(OUT_CAP_HOPS + 3) {
+    for _ in 0..(CAP_HOPS + 3) {
       hub.push_tx_hop(&hop);
     }
     let mut out = [0.0f32; HOP];
-    for _ in 0..OUT_CAP_HOPS {
+    for _ in 0..CAP_HOPS {
       assert!(sub.take_hop(&mut out), "应能连续取出封顶内的 hop");
     }
     assert!(!sub.take_hop(&mut out), "超出封顶的应被丢弃");

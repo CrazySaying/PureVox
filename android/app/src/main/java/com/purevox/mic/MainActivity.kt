@@ -21,6 +21,7 @@ package com.purevox.mic
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.NotificationManager
 import android.content.BroadcastReceiver
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -34,6 +35,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
+import android.os.SystemClock
 import android.provider.Settings
 import android.text.Editable
 import android.text.TextWatcher
@@ -95,6 +97,15 @@ class MainActivity : AppCompatActivity() {
         private const val DEFAULT_HOST = "192.168.1.100"
         private const val MAX_LOG_LINES = 80
         private const val STATUS_INTERVAL_MS = 500L
+
+        /**
+         * 「补挂通知」的最小间隔。
+         *
+         * 常驻通知不能只靠开始时发的那一次：起前台服务可能被系统拒（后台）、通知可能被撤，
+         * 失败一次就整个会话都在裸奔。这里每几秒重试一次，但不要每 500 ms 都发
+         * （重发通知本身会让通知栏闪）。
+         */
+        private const val NOTIF_RETRY_MS = 5_000L
 
         /** 下行缓冲水位条的满量程：200 ms（稳态水位约 40 ms，上下浮动都正常）。 */
         private const val BUFFER_FULL_MS = 200
@@ -167,6 +178,17 @@ class MainActivity : AppCompatActivity() {
     private var svcRunning = false
     private var svcMic = false
 
+    /**
+     * 界面是否在前台（onStart→onStop）。
+     *
+     * 用途只有一个：**界面开着就把通知挂着** —— 前台服务的第一次起必须在界面在前台时完成，
+     * 后台里被拒的话整个会话都在裸奔（系统随时掐进程）。
+     */
+    private var visible = false
+
+    /** 上次「补挂通知」的尝试时刻（`elapsedRealtime`），避免每 500 ms 重发一次通知。 */
+    private var lastNotifTry = 0L
+
     // 应用内更新状态（手动检查、手动下载、手动安装）
     private var updateRelease: UpdateChecker.ReleaseInfo? = null
     private var updateApk: File? = null
@@ -207,6 +229,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnSend: Button
     private lateinit var btnClear: Button
     private lateinit var tvBattery: TextView
+    private lateinit var tvKeepalive: TextView
+    private lateinit var tvNotifPerm: TextView
+    private lateinit var btnNotifSettings: Button
     private lateinit var btnBattery: Button
     private lateinit var tvUpdate: TextView
     private lateinit var btnCheckUpdate: Button
@@ -241,6 +266,8 @@ class MainActivity : AppCompatActivity() {
     private val ticker = object : Runnable {
         override fun run() {
             updateStatus()
+            // 保活状态跟着刷：挂了 / 没挂上（带原因）随时看得到
+            updateKeepalive()
             ui.postDelayed(this, STATUS_INTERVAL_MS)
         }
     }
@@ -343,6 +370,8 @@ class MainActivity : AppCompatActivity() {
 
         // 后台保活：电池优化白名单
         btnBattery.setOnClickListener { requestIgnoreBattery() }
+        // 通知权限/渠道关掉了没有 —— 一键跳到本应用的通知设置（拒过之后系统不再弹窗）
+        btnNotifSettings.setOnClickListener { openNotifSettings() }
 
         // 应用内更新：手动检查 → 下载 → 安装（不自动检查，见 UpdateChecker）
         btnCheckUpdate.setOnClickListener { checkUpdate() }
@@ -370,16 +399,24 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
+        visible = true
         ui.post(ticker)
+        // 进入前台就补挂通知：后台里起前台服务可能被系统拒（失败只留痕），
+        // 这里是唯一可靠的「补挂」时机。
+        syncSessionService()
     }
 
     override fun onResume() {
         super.onResume()
         // 从系统设置切回来时刷新电池优化状态
         refreshBattery()
+        syncSessionService()
+        updateKeepalive()
+        maybeRequestNotifPermission()
     }
 
     override fun onStop() {
+        visible = false
         ui.removeCallbacks(ticker)
         super.onStop()
     }
@@ -735,12 +772,19 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 会话前台服务对账：**已连接**或**正在推流**就常驻通知（保活），两者都没有就撤掉。
-     * 只在「该不该跑 / 含不含麦克风」变化时下发，避免每次对账都重发通知。
+     * 会话前台服务对账：**已连接 / 正在推流 / 连接中 / 界面在前台** 就常驻通知（保活）。
+     *
+     * 2026-10-18 用户实测结论：「手机还是要常驻通知，不然还是会被杀掉」——
+     * 所以这里刻意**宽**：界面只要开着就把通知挂着（后台里起前台服务会被系统拒绝，
+     * 那一次失败没有第二次机会，等于整个会话都在裸奔）。真正撤掉只在
+     * [teardown]（用户主动断开 / 退出界面）时发生。
+     *
+     * 只在「该不该跑 / 含不含麦克风」变化时下发，避免每次对账都重发通知；
+     * `force = true` 用于**补挂**（通知其实没挂上，去重逻辑会挡住重发）。
      */
-    private fun syncSessionService() {
+    private fun syncSessionService(force: Boolean = false) {
         val mic = uplink != null
-        val keep = ready || mic
+        val keep = ready || mic || connecting || visible
         if (!keep) {
             if (svcRunning) {
                 CaptureService.stop(this)
@@ -749,11 +793,90 @@ class MainActivity : AppCompatActivity() {
             }
             return
         }
-        if (svcRunning && svcMic == mic) return
+        if (!force && svcRunning && svcMic == mic) return
         svcRunning = true
         svcMic = mic
-        val text = if (mic) getString(R.string.notif_default) else getString(R.string.notif_connected)
+        val text = when {
+            mic -> getString(R.string.notif_default)
+            ready -> getString(R.string.notif_connected)
+            else -> getString(R.string.notif_idle)
+        }
         CaptureService.update(this, text, mic)
+        updateKeepalive()
+    }
+
+    /**
+     * 「后台保活」卡片上的通知状态：挂了 / 没挂 / 没挂上（带原因）。
+     *
+     * 三种状态必须分得开：**没挂上**（系统拒绝起前台服务）和**没挂**（会话结束了）
+     * 对用户来说意义完全不同 —— 前者要等切回前台补挂，后者是正常状态。
+     *
+     * 顺带**补挂**：会话要通知、通知却不在（被系统撤了、起前台服务被拒过、进程被掐过之后
+     * 又回到前台），这里每几秒重发一次。常驻通知不能只靠「开始时发过一次」——
+     * 那一次失败就整个会话都在裸奔（用户 2026-10-18 的实测结论）。
+     */
+    private fun updateKeepalive() {
+        val want = ready || svcMic || uplink != null || connecting || visible
+        if (want && !CaptureService.foreground) {
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastNotifTry >= NOTIF_RETRY_MS) {
+                lastNotifTry = now
+                syncSessionService(force = true)
+            }
+        }
+        val s = when {
+            CaptureService.foreground -> getString(R.string.keepalive_notif_on)
+            !svcRunning -> getString(R.string.keepalive_notif_off)
+            CaptureService.lastError != null ->
+                getString(R.string.keepalive_notif_failed, CaptureService.lastError)
+            else -> getString(R.string.keepalive_notif_off)
+        }
+        tvKeepalive.text = s
+        tvNotifPerm.text = getString(notifPermissionText())
+    }
+
+    /** 通知权限 / 通知渠道的**可读**结论：调不到就直说，不假装正常。 */
+    private fun notifPermissionText(): Int {
+        val nm = getSystemService(NotificationManager::class.java)
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            return if (nm.areNotificationsEnabled()) R.string.notif_perm_on else R.string.notif_perm_off
+        }
+        if (!nm.areNotificationsEnabled()) return R.string.notif_perm_off
+        val ch = nm.getNotificationChannel(CaptureService.CHANNEL_ID)
+        if (ch != null && ch.importance == NotificationManager.IMPORTANCE_NONE) {
+            return R.string.notif_perm_channel_off
+        }
+        return R.string.notif_perm_on
+    }
+
+    /**
+     * 打开本应用的通知设置。
+     *
+     * **必须能手动兜底**：Android 13+ 的通知权限只要被拒过一次，弹窗就不再出现
+     * （再调 [requestPermissions] 也静默返回），此时唯一的路就是设置页 ——
+     * 用户报告「没看到通知权限弹窗」（2026-10-18）正是这种情况。
+     */
+    private fun openNotifSettings() {
+        val nm = getSystemService(NotificationManager::class.java)
+        if (nm.areNotificationsEnabled()) {
+            // 权限在，但渠道可能被单独关掉 —— 直接进本应用的渠道页
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startActivity(
+                    Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
+                        .putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                        .putExtra(Settings.EXTRA_CHANNEL_ID, CaptureService.CHANNEL_ID),
+                )
+                return
+            }
+        }
+        val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                .putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+        } else {
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                .setData(Uri.fromParts("package", packageName, null))
+        }
+        startActivity(intent)
     }
 
     /** 起上行：先起前台服务（Android 9+ 后台麦克风的前提），再开 AudioRecord。 */
@@ -883,6 +1006,22 @@ class MainActivity : AppCompatActivity() {
         if (want.isNotEmpty()) {
             permissionLauncher.launch(want.toTypedArray())
         }
+    }
+
+    /**
+     * 通知权限的**第二次机会**。
+     *
+     * Android 13+ 的 POST_NOTIFICATIONS 被拒一次后系统仍允许再弹（此时
+     * `shouldShowRequestPermissionRationale` = true）；再拒一次就永久静默 —— 那时唯一的
+     * 出路是设置页，界面上有「通知设置」按钮兜底（[openNotifSettings]）。
+     * 用户报告「从没见过通知权限弹窗」（2026-10-18），所以这条补一次是必要的。
+     */
+    private fun maybeRequestNotifPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        val p = Manifest.permission.POST_NOTIFICATIONS
+        if (ContextCompat.checkSelfPermission(this, p) == PackageManager.PERMISSION_GRANTED) return
+        if (!shouldShowRequestPermissionRationale(p)) return
+        permissionLauncher.launch(arrayOf(p))
     }
 
     // ---------------------------------------------------------------- 状态显示
@@ -1075,6 +1214,9 @@ class MainActivity : AppCompatActivity() {
             append('\n')
             append(tvStatus.text)
             append(tvHealth.text).append('\n')
+            append(tvKeepalive.text).append('\n')
+            append(tvNotifPerm.text).append('\n')
+            append(tvBattery.text).append('\n')
             if (lastErr.isNotEmpty()) append(lastErr).append('\n')
             append('\n').append(tvLog.text).append('\n')
         }
@@ -1249,6 +1391,9 @@ class MainActivity : AppCompatActivity() {
         btnSend = findViewById(R.id.btnSend)
         btnClear = findViewById(R.id.btnClear)
         tvBattery = findViewById(R.id.tvBattery)
+        tvKeepalive = findViewById(R.id.tvKeepalive)
+        tvNotifPerm = findViewById(R.id.tvNotifPerm)
+        btnNotifSettings = findViewById(R.id.btnNotifSettings)
         btnBattery = findViewById(R.id.btnBattery)
         tvUpdate = findViewById(R.id.tvUpdate)
         btnCheckUpdate = findViewById(R.id.btnCheckUpdate)

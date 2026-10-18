@@ -45,6 +45,12 @@ pub struct Capture {
 
 pub(super) const PUBLISH_PERIOD: Duration = Duration::from_millis(200);
 const POLL_PERIOD: Duration = Duration::from_millis(5);
+/// 放行网格：与列工作线程同一套 10 ms 节拍（DESIGN.md §3.3）。
+const RELEASE_GRID: Duration = Duration::from_millis(10);
+/// 行输入环（fanout 环）的目标垫层：2 hop（DESIGN.md §3.3「输入环目标 2 hop」）。
+const DOWNSTREAM_TARGET_HOPS: usize = 2;
+/// 设备环积压上限（ms）：超过就按 2× 实时追平（源比标称快，或下游停摆）。
+const DEV_BACKLOG_MS: usize = 300;
 pub(super) const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 /// 超过此时长没有回调即判定流已停止（设备拔出、驱动异常等）。
 pub(super) const STALL_LIMIT: Duration = Duration::from_secs(1);
@@ -61,6 +67,13 @@ pub(super) struct CallbackStats {
   pub errors: AtomicU64,
   /// 错误回调罕见且不在数据回调路径上，加锁可接受
   last_error: Mutex<Option<String>>,
+  /// 本流建立的时刻：回调间隔以它为基准（`Instant` 进不了原子量，故存相对纳秒）
+  base: Instant,
+  /// 上一次回调相对 `base` 的纳秒数；0 = 还没有过回调
+  last_cb_ns: AtomicU64,
+  /// 相邻两次回调的间隔（微秒）：最近 / 最大。设备按不按时喂块，比块大小更直接
+  last_gap_us: AtomicU32,
+  max_gap_us: AtomicU32,
 }
 
 impl CallbackStats {
@@ -74,10 +87,14 @@ impl CallbackStats {
       xruns: AtomicU64::new(0),
       errors: AtomicU64::new(0),
       last_error: Mutex::new(None),
+      base: Instant::now(),
+      last_cb_ns: AtomicU64::new(0),
+      last_gap_us: AtomicU32::new(0),
+      max_gap_us: AtomicU32::new(0),
     }
   }
 
-  /// 在数据回调开头调用（仅原子操作）。
+  /// 在数据回调开头调用（仅原子操作 + 读一次时钟，不加锁）。
   #[inline]
   pub fn on_block(&self, frames: u32) {
     self.callbacks.fetch_add(1, Relaxed);
@@ -85,6 +102,15 @@ impl CallbackStats {
     self.last_block.store(frames, Relaxed);
     self.min_block.fetch_min(frames, Relaxed);
     self.max_block.fetch_max(frames, Relaxed);
+    // 回调间隔：首个回调不记（`base` 到首块的距离是启动开销，不是设备节拍），
+    // 之后每两次之间的间隔都算 —— 抽一下能立刻看见「某次回调晚了 120 ms」。
+    let t = self.base.elapsed().as_nanos() as u64;
+    let prev = self.last_cb_ns.swap(t, Relaxed);
+    if prev != 0 && t > prev {
+      let gap_us = ((t - prev) / 1000).min(u32::MAX as u64) as u32;
+      self.last_gap_us.store(gap_us, Relaxed);
+      self.max_gap_us.fetch_max(gap_us, Relaxed);
+    }
   }
 
   pub fn on_error(&self, e: String) {
@@ -104,15 +130,21 @@ impl CallbackStats {
       last: self.last_block.load(Relaxed),
       min: self.min_block.load(Relaxed),
       max: self.max_block.load(Relaxed),
+      last_gap_ms: self.last_gap_us.load(Relaxed) as f32 / 1000.0,
+      max_gap_ms: self.max_gap_us.load(Relaxed) as f32 / 1000.0,
     })
   }
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct CallbackFrames {
+  /// 块大小（帧）：最近 / 最小 / 最大
   pub last: u32,
   pub min: u32,
   pub max: u32,
+  /// 相邻两次回调的间隔（ms）：最近 / 最大（首个回调不计，见 `on_block`）
+  pub last_gap_ms: f32,
+  pub max_gap_ms: f32,
 }
 
 /// 回调停顿判定：回调计数持续增长即健康。
@@ -334,32 +366,61 @@ pub(super) fn worker<K>(
   let mut meter = Meter::new();
   let mut in_rate = RateMeter::new();
   let mut out_rate = RateMeter::new();
+  let mut drop_rate = RateMeter::new();
+  let mut err_rate = RateMeter::new();
   let mut stall = StallWatch::new();
   let mut hops: u64 = 0;
   let mut resample_error: Option<String> = None;
   let mut last_publish = Instant::now() - PUBLISH_PERIOD;
+  // 放行节拍状态：一格 = 10 ms 的原生样本量
+  let slot_frames = (native_rate as usize / 100).max(1);
+  let mut next_release = Instant::now();
 
   while !stop.load(Relaxed) {
     let n = cons.slots();
     let ring_level_ms = n as f32 * 1000.0 / native_rate as f32;
-    if n > 0
-      && let Ok(chunk) = cons.read_chunk(n)
-    {
-      let (a, b) = chunk.as_slices();
-      for part in [a, b] {
-        let r = to_hops.push(part, |hop| {
-          meter.on_hop(hop);
-          fanout.push_hop(hop);
-          hops += 1;
-        });
-        if let Err(e) = r {
-          resample_error = Some(e);
+    let now = Instant::now();
+    // ---- 放行节拍 ----
+    // 源可能「一大块到达」：Linux `parec` 一次 100 ms（4800 样本，实测 `callback_frames`
+    // 就是 4800/4800/4800）。整块顺着往下推不行——下游全是 10 ms 级的有界环，块会把
+    // 「行输入环」一次灌满、又在块与块的接缝上被抽干 → 列工作线程每个块边界饿一格 →
+    // 听感是**规律的咔咔声**（2026-10-18 实测：手机端每秒约 10 次卡顿）。
+    // 所以按 10 ms 网格放行，且只在「下游缺料」或「设备环积压」时放：整块留在设备环里
+    // 当垫层，下游拿到的是一格一格的平滑 hop 流。
+    if n > 0 && now >= next_release {
+      // 落后太多就重新对齐（不追赶式突发）；正常情况对齐到 10 ms 网格
+      next_release = if now.duration_since(next_release) > RELEASE_GRID * 4 {
+        now + RELEASE_GRID
+      } else {
+        next_release + RELEASE_GRID
+      };
+      let backlog = n > slot_frames * DEV_BACKLOG_MS / 10;
+      let starved = fanout.min_level() < DOWNSTREAM_TARGET_HOPS * HOP;
+      // 积压时按 2× 实时放（源比标称快 / 下游停摆），否则一格
+      let cap = if backlog {
+        slot_frames * 2
+      } else {
+        slot_frames
+      };
+      let take = if backlog || starved { n.min(cap) } else { 0 };
+      if take > 0
+        && let Ok(chunk) = cons.read_chunk(take)
+      {
+        let (a, b) = chunk.as_slices();
+        for part in [a, b] {
+          let r = to_hops.push(part, |hop| {
+            meter.on_hop(hop);
+            fanout.push_hop(hop);
+            hops += 1;
+          });
+          if let Err(e) = r {
+            resample_error = Some(e);
+          }
         }
+        chunk.commit_all();
       }
-      chunk.commit_all();
     }
 
-    let now = Instant::now();
     if now.duration_since(last_publish) >= PUBLISH_PERIOD {
       last_publish = now;
       let m = meter.take();
@@ -373,16 +434,19 @@ pub(super) fn worker<K>(
       };
       let frames_in = stats.frames.load(Relaxed);
       let frames_out = hops * HOP as u64;
+      let xruns = stats.xruns.load(Relaxed);
+      let errors = stats.errors.load(Relaxed);
       let (inf_avg, inf_max) = (
         Probe::unavailable("处理链在列里（见引擎概要）"),
         Probe::unavailable("处理链在列里（见引擎概要）"),
       );
-      hub.set_stream(StreamInfo {
+      let mut st = StreamInfo {
         id: stream_id.clone(),
         direction: "input",
         device_id: info.device_id.clone(),
         device_name: info.name.clone(),
         state,
+        health: Probe::Pending, // 下面 health::annotate 会按 state + 计数/速率填上
         started_at,
         source: None,
         denoise: Probe::unavailable("降噪在处理链（列）里"),
@@ -404,9 +468,13 @@ pub(super) fn worker<K>(
         peak_dbfs: m.peak_dbfs,
         rms_dbfs: m.rms_dbfs,
         underruns: Probe::unavailable("输入流无欠载概念"),
-        overruns: stats.xruns.load(Relaxed),
+        overruns: xruns,
         resyncs: Probe::unavailable("输入流无重同步"),
-        stream_errors: stats.errors.load(Relaxed),
+        stream_errors: errors,
+        underrun_per_s: Probe::unavailable("输入流无欠载概念"),
+        resync_per_s: Probe::unavailable("输入流无重同步"),
+        overrun_per_s: drop_rate.push(now, xruns),
+        stream_error_per_s: err_rate.push(now, errors),
         last_error,
         buffer_level_ms: ring_level_ms,
         device_buffer_ms: Probe::unavailable("输入流：环形缓冲即设备侧缓冲，见 buffer_level_ms"),
@@ -416,7 +484,9 @@ pub(super) fn worker<K>(
         waveform: m.waveform,
         spectrum_db: m.spectrum_db,
         spectrum_bin_hz: SPECTRUM_BIN_HZ,
-      });
+      };
+      super::health::annotate(&mut st);
+      hub.set_stream(st);
     }
     std::thread::sleep(POLL_PERIOD);
   }

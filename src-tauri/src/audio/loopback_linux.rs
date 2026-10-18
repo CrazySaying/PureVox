@@ -50,6 +50,20 @@ pub const FAR_GRID_REALTIME: bool = true;
 /// 采集采样率/格式（parec 直接给 48 kHz 单声道 f32，与引擎内部格式一致）。
 const RATE: u32 = 48_000;
 
+/// `parec` 请求的**缓冲**与**处理块**（ms）—— 这一路回环的固定延迟下限就在这里。
+///
+/// 两个值各自解决一件事，别混：
+/// - **默认缓冲 ≈ 1.9 s 必须压低**（`--latency-msec`）：否则 far 会比 mic 晚近 2 s，
+///   校准的 ±1 s 搜索窗根本够不着（实测「相关太弱（0.000）」就是这么来的）。
+/// - **压低到多少 = 这一路自己的延迟**：100 ms 时收到的块是 4800 样本（100 ms 一块），
+///   「电脑声音串流」听得出拖一截；30 ms 时块是 1440 样本（30 ms），实测稳定。
+///   采集侧现在有 10 ms 网格释放器兜住突发，块大小不再直接冲击下游水位。
+///   **别为了「越小越好」往下压**：太小会开始欠载（丢弃/补零有统计可查，
+///   见 `/debug/audio` 的 overrun / 回调间隔），要再低得先看欠载率。
+pub const PARE_LATENCY_MS: u32 = 30;
+/// 处理块（`--process-time-msec`）：与缓冲同量级，太小会让 parec 自己变忙。
+pub const PARE_PROCESS_MS: u32 = 10;
+
 /// 打开输出回环并启动采集线程。
 pub fn spawn(hub: SharedHub, output_id: Option<String>, tag: String) -> Result<Capture, String> {
   let stop = Arc::new(AtomicBool::new(false));
@@ -156,8 +170,9 @@ fn pump(
       "--channels=1",
       // **必须压低缓冲**：parec 默认 buffer ≈ 1.9 s，far 会比 mic 晚近 2 s，
       // 校准的 ±1 s 搜索窗根本够不着（实测「相关太弱（0.000）」就是这么来的）。
-      "--latency-msec=100",
-      "--process-time-msec=20",
+      // 具体取多少见 [`PARE_LATENCY_MS`] —— 它同时就是这一路回环的延迟下限。
+      &format!("--latency-msec={PARE_LATENCY_MS}"),
+      &format!("--process-time-msec={PARE_PROCESS_MS}"),
     ])
     .stdin(Stdio::null())
     .stdout(Stdio::piped())
@@ -167,7 +182,8 @@ fn pump(
     Ok(c) => c,
     Err(e) => {
       let _ = fmt_tx.send(Err(format!(
-        "启动 parec 失败（需要 PipeWire/PulseAudio）：{e}"
+        "启动 parec 失败：{e}（{}）",
+        super::PULSE_TOOLS_HINT
       )));
       return;
     }

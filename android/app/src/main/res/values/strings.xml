@@ -85,10 +85,20 @@
     <string name="msg_send_blocked">未连接，或「远程输入 / 打字同步」未开启</string>
 
     <!-- 后台保活 -->
-    <string name="keepalive_desc">推流期间会常驻前台服务通知（带「停止 / 断开」按钮）。再允许「忽略电池优化」，息屏久一点也不会被系统冻结。</string>
+    <string name="keepalive_desc">应用开着就常驻前台服务通知（带「停止 / 断开」按钮）—— 撤掉通知系统会随手掐掉本进程。再允许「忽略电池优化」，息屏久一点也不会被系统冻结。</string>
     <string name="btn_battery_settings">忽略电池优化设置</string>
     <string name="battery_ignored">电池优化：已忽略 ✓（后台不易被冻结）</string>
     <string name="battery_not_ignored">电池优化：未忽略（息屏久了可能被冻结）</string>
+    <string name="keepalive_notif_on">常驻通知：已挂 ✓（系统不会随手掐掉本进程）</string>
+    <string name="keepalive_notif_off">常驻通知：未挂</string>
+    <string name="keepalive_notif_failed">常驻通知：没挂上（%1$s）—— 切回前台会自动补挂</string>
+
+    <!-- 通知权限（Android 13+ 必须允许，通知才看得见） -->
+    <string name="notif_perm_unknown">通知权限：未知</string>
+    <string name="notif_perm_on">通知权限：已允许 ✓</string>
+    <string name="notif_perm_off">通知权限：**没允许** —— 保活通知看不见，系统可能随手掐掉本进程（点下面按钮打开）</string>
+    <string name="notif_perm_channel_off">通知权限：已允许，但这个通知渠道被关掉了（点下面按钮打开）</string>
+    <string name="btn_notif_settings">通知设置</string>
 
     <!-- 前台服务通知 -->
     <string name="notif_channel_name">麦克风推流</string>
@@ -96,6 +106,7 @@
     <string name="notif_starting">正在启动麦克风…</string>
     <string name="notif_default">正在推流</string>
     <string name="notif_connected">已连接电脑（后台保活）</string>
+    <string name="notif_idle">待连接（后台保活）</string>
     <string name="notif_action_stop">停止推流</string>
     <string name="notif_action_disconnect">断开连接</string>
 

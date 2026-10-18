@@ -42,7 +42,10 @@ import com.purevox.mic.R
  * 音频与网络线程都在界面进程里，没有前台服务，Android 9+ 后台拿不到麦克风、Android 12+
  * 还会被系统直接掐掉。
  *
- * **服务范围 = 整个会话，不是只有麦克风**：只要「已连接」或「正在推流」就常驻，
+ * **服务范围 = 整个会话**（不是只有麦克风）：只要「已连接」「正在推流」「连接中」或**界面在前台**
+ * 就常驻通知。2026-10-18 用户实测结论：**撤掉通知之后系统很快就把进程掐了** ——
+ * 界面开着就得把通知挂着，别等「连上了再挂」（后台里起前台服务会被系统拒绝，
+ * 那一次的失败要等到界面在前台时补挂，见 [MainActivity.onResume]）。
  * 通知里的两个按钮（[BROADCAST_NOTIF_STOP] / [BROADCAST_NOTIF_DISCONNECT]）由界面
  * （[MainActivity]）接收并处理 —— 服务本身不认识协议，**界面是唯一的编排者**。
  *
@@ -74,6 +77,32 @@ class CaptureService : Service() {
         const val CHANNEL_ID = "purevox_mic_stream"
         const val NOTIFICATION_ID = 1001
 
+        /**
+         * 最近一次「挂通知」失败的原因（null = 没失败过）。
+         *
+         * **必须能被界面读到**：挂不上通知 = 系统随时可以掐掉本进程（用户的实测结论，
+         * 2026-10-18：撤掉通知之后很快就掉线）。失败本身不炸界面（保活是尽力而为），
+         * 但绝不能**静默** —— 界面「后台保活」卡片与诊断里会写出来。
+         */
+        @Volatile
+        var lastError: String? = null
+            private set
+
+        /** 本进程当前是否真的挂着前台通知（由服务在成功/停止时维护）。 */
+        @Volatile
+        var foreground = false
+            private set
+
+        internal fun noteError(msg: String) {
+            lastError = msg
+            foreground = false
+        }
+
+        internal fun noteForeground() {
+            lastError = null
+            foreground = true
+        }
+
         private const val WAKE_LOCK_TAG = "PureVoxMic:AudioWakeLock"
 
         fun start(ctx: Context, text: String, mic: Boolean) =
@@ -100,8 +129,10 @@ class CaptureService : Service() {
                 }
             } catch (e: Throwable) {
                 // Android 12+ 从后台起前台服务会抛 ForegroundServiceStartNotAllowedException。
-                // 这里不能让它炸掉界面：保活失败只是「没通知」，连接与推流照常。日志留痕。
+                // 这里不能让它炸掉界面：保活失败只是「没通知」，连接与推流照常。日志留痕，
+                // **并且写进界面/诊断** —— 看不见的「保活没生效」等于没有保活。
                 Log.e(TAG, "起前台服务失败（保活未生效）", e)
+                lastError = "起前台服务被拒：${e.javaClass.simpleName}"
             }
         }
     }
@@ -160,9 +191,11 @@ class CaptureService : Service() {
             } else {
                 startForeground(NOTIFICATION_ID, notification)
             }
+            noteForeground()
         } catch (e: Throwable) {
             // Android 12+ 从后台起前台服务会抛；界面会把它显示出来，不静默
             Log.e(TAG, "startForeground 失败", e)
+            noteError("startForeground 失败：${e.javaClass.simpleName}")
             stopSelf()
         }
     }
@@ -178,6 +211,7 @@ class CaptureService : Service() {
         } catch (e: Throwable) {
             Log.w(TAG, "stopForeground 异常", e)
         }
+        foreground = false
     }
 
     private fun createChannel() {

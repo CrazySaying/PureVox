@@ -46,7 +46,7 @@ release 构建同样保留（不允许用编译开关剔除）。
 | --- | --- |
 | `GET /debug` | 汇总：下列全部端点的合集 |
 | `GET /debug/system` | **CPU**：系统总占用、本进程占用、逻辑核数；**内存**：系统总量/可用、本进程工作集与私有字节；**GPU**：每块 GPU 的名称、占用率、显存总量/已用（含本进程） |
-| `GET /debug/audio` | 每路音频流：方向、设备、**信号源（仅输出）**、状态、降噪状态（字段保留但已废弃：降噪现为列处理行，见 `audio.engine`）、设备原生格式、实测**设备侧 / 引擎侧速率**（3 s 窗口）、重采样器与其延迟、**输出流的时钟伺服修正（ppm）**、回调块大小（最近/最小/最大）、帧与 hop 计数、不足一 hop 的剩余帧、峰值/RMS 电平、**输出流欠载补静音样本数与重同步次数**、溢出/丢弃样本、流错误计数、48k 缓冲水位与**设备侧缓冲水位**、端到端延迟、**模型推理耗时（均值/最大）**；最近 50 ms 波形与平均频谱（481 bin，NFFT 960，输入流为降噪后、输出流为重采样前） |
+| `GET /debug/audio` | 每路音频流：**结论（`health`，Rust 侧统一判定的健康度 `{level, text}`，阈值集中在 `audio/health.rs`，面板只渲染不算，见 1.3）**、方向、设备、**信号源（仅输出）**、状态、降噪状态（字段保留但已废弃：降噪现为列处理行，见 `audio.engine`）、设备原生格式、实测**设备侧 / 引擎侧速率**（3 s 窗口）、重采样器与其延迟、**输出流的时钟伺服修正（ppm）**、回调块大小（最近/最小/最大）与**回调间隔（最近/最大 ms，音频回调里锁-free 实测：只看回调次数看不出「卡了 2 秒又继续」）**、帧与 hop 计数、不足一 hop 的剩余帧、峰值/RMS 电平、**输出流欠载补静音样本数与重同步次数**、溢出/丢弃样本、流错误计数、**上述事件的实测每秒速率（`underrun_per_s` / `resync_per_s` / `overrun_per_s` / `stream_error_per_s`，3 s 窗口；累计计数只涨不降，速率才看得出现在还在不在发生）**、48k 缓冲水位与**设备侧缓冲水位**、端到端延迟、**模型推理耗时（均值/最大）**；另有汇总结论 `audio.verdict`（全部流的整体判断）；最近 50 ms 波形与平均频谱（481 bin，NFFT 960，输入流为降噪后、输出流为重采样前） |
 | `GET /debug/devices` | 全部枚举到的输入/输出设备：ID、名称、接口、原生采样率/声道、是否默认、是否被选中、是否已打开；以及最近一次枚举的时间与耗时 |
 
 - 字段只增不改名；新增字段同步更新本表。
@@ -83,8 +83,19 @@ release 构建同样保留（不允许用编译开关剔除）。
 - **采集链路**（`src-tauri/src/audio/`）：设备按原生默认格式打开 → 回调线程只做下混单声道 +
   写 `rtrb` 无锁环 + 原子计数 → 每路一个工作线程（独占 cpal 流）用 rubato `Async` sinc 重采样到
   48 kHz（`resampler::ToHops`，引擎唯一重采样实现；原生 48k 直通）并在 48k 输出侧切 480 样本 hop。
+  **放行按 10 ms 网格**（`capture.rs` 的 `RELEASE_GRID` / `DOWNSTREAM_TARGET_HOPS` / `DEV_BACKLOG_MS`）：
+  有些源是**突发**的 —— `parec` 一次给一整块（100 ms 缓冲时实测 4800 样本/次、~10 次/s；现取 30 ms，
+  块 1440 样本、~33 次/s），一次性倒进扇出
+  会把下游行输入环冲爆、块之间又立刻饿死，`ROW_CAP` 于是静默丢掉 ~80%（实测 38333 样本/s 丢弃，
+  「手机/电脑声音串流吞吞吐吐」的真正原因）；是突发就把整块留在设备环里、按节拍放，只有下游水位
+  不足（`min_level`）或设备环积压超 `DEV_BACKLOG_MS` 时才全速放行（那两种情况放行才是对的）。
   流健康以「回调是否持续到达」判定（停顿 ≥ 1 s 为不可用）；WASAPI 偶发的不连续标志只计入流错误数，
   不判失败。
+- **流健康度（结论）只有一处实现**（`audio/health.rs`）：`Health { level, text }` 全由 `annotate`
+  统一判定（回调间隔、速率偏差、欠载/重同步/丢弃/错误的**每秒速率**），汇总结论 `overall` 同理；
+  阈值是那两条常量（`RATE_TOLERANCE` / `EVENT_EPS`）。**面板与 HTTP 序列化的是同一份判定结果**，
+  UI 只按 `level` 上色，禁止自己再算一套（1.3 单一数据源）。回调间隔在回调线程里量：每路一个
+  `Instant` 起点 + 相对纳秒的原子写，不加锁、不分配、不进音频路径。
 - **输出链路**（`src-tauri/src/audio/playback.rs`，播放正确性只此一处）：源扇出（`fanout.rs`）→
   48k 订阅环 → 每路工作线程用同一 [`Converter`] 重采样到设备采样率（含 48k→48k，因需调比例）→
   设备环；**设备回调是唯一主时钟**，回调里只取样、缺数据补静音（不在回调里写任何缓冲策略）。
@@ -98,8 +109,11 @@ release 构建同样保留（不允许用编译开关剔除）。
   monitor（`float32le` 48k 单声道）再喂进与 cpal 采集同一个工作循环（重采样/计量/扇出一致）。`loopback` =
   系统默认输出、`loopback:<sink>` = 指定 PipeWire sink；候选由命令 `list_loopback_targets` 给出
   （Linux = `pactl list sinks`，Windows = cpal 输出设备）。Windows 侧仍是 WASAPI loopback（`audio/loopback.rs`）。
-  **`parec` 必须带 `--latency-msec=100 --process-time-msec=20`**：默认缓冲 ≈ 1.9 s，far 会比 mic 晚近 2 s，
-  校准的 ±1 s 搜索窗够不着 → 一直「相关太弱（0.000）」（Windows WASAPI 回环无此问题）。`pactl` 解析一律
+  **`parec`/`pacat` 必须压低缓冲，取值唯一来源 `loopback::PARE_LATENCY_MS` / `PARE_PROCESS_MS`
+  （现为 30/10，探针复用同一对常量）**：默认缓冲 ≈ 1.9 s，far 会比 mic 晚近 2 s，
+  校准的 ±1 s 搜索窗够不着 → 一直「相关太弱（0.000）」（Windows WASAPI 回环无此问题）。
+  **这对值同时就是这一路回环的固定延迟下限**（100 ms 时块 = 4800 样本，电脑声音串流听得出拖一截；
+  30 ms 时块 = 1440 样本）；别再往下压，太小会开始欠载（丢弃/补零在 `/debug/audio` 有统计）。`pactl` 解析一律
   `LC_ALL=C`（中文 locale 下输出「名称/描述」，按 `Name:` 会解析出 0 个 sink）。
 - **虚拟驱动页（顶栏「驱动」）**：按平台切同一面板——Linux（`audio/virtual_mic.rs` + `ui/drivers_linux.js`）
   照 legacy 建 `purevox_out` null-sink（`pw-cli create-node adapter`）+ monitor + `pactl module-remap-source`
@@ -166,6 +180,14 @@ release 构建同样保留（不允许用编译开关剔除）。
     `FloatArray` 全链路，转换只发生一次。
   - **主时钟在引擎侧**：网络任务只把解码后的样本塞进队列（进出各有界：目标 50 ms、
     硬顶 80 ms，超限丢最旧），由列工作线程按自己的 10 ms 节拍取；欠载补静音。
+    **硬顶不够，必须还会「慢慢回到目标」**（`net/hub.rs` 的 `CAP_HOPS`/`TARGET_HOPS`/`catchup`）：
+    两个方向的推/取都是各自 10 ms 定时器，水位是**随机游走** —— 一次**会话重建**（换列、改设备、
+    打开设备重试）期间没人取、手机却一直在推，水位就一次性垫高，之后推取同速**再也降不回来**。
+    实测 2026-10-18：手机麦克风本该 10~50 ms，**加一列之后一直拖 230 ms**（用户报的「一开串流
+    麦克风就延迟」其实是「每次重建都把水位垫高一截」，跟串流本身无关）；同一处 `IN_CAP` 还曾被写成
+    `SAMPLE_RATE / 100 * 80` = 38400 样本 = **800 ms**（本意 80 ms，差 10 倍）→ 上限一律由 hop 派生。
+    取舍：收敛只在超出目标时发生，每 1 s 多丢 1 个 hop（听感是偶发一跳），换来稳定在目标附近的延迟；
+    水位在目标以内**一点不丢**（有单测钉住）。
   - **出站节拍用绝对时刻**（`next += 10ms` 再 `sleep_until(next)`），不要
     `sleep(10ms - 本轮已用)`：后者实测只产 ~64 包/s（列工作线程与反馈端同理，§3.3）。
   - **按键注入**（`net/keys.rs`）：`SendInput` + **Set 1 扫描码**（不是虚拟键码，能走真实
@@ -181,10 +203,22 @@ release 构建同样保留（不允许用编译开关剔除）。
   缓冲水位、欠载/丢包/解码掩盖）两块 + 日志，**默认收起**、标题行点击展开（状态面板不消失，
   只是不再一上来占满屏），「复制诊断」一键把整块塞剪贴板（报问题不必截图）；
   实时量没有样本时写「采样中…」、没连上写「未连接」、没订阅写「未开启」，**不伪造 0**。
-  - **会话保活**（`service/CaptureService.kt`）：只要「已连接」或「正在推流」就挂常驻通知
-    （前台服务类型 `microphone|dataSync`，只报在用的那个），通知带「停止推流 / 断开连接」
+  - **会话保活**（`service/CaptureService.kt`）：只要「已连接」「正在推流」「连接中」**或界面在前台**
+    就把常驻通知挂着（前台服务类型 `microphone|dataSync`，只报在用的那个），通知带「停止推流 / 断开连接」
     两个按钮 —— 按钮发**广播**回界面（`MainActivity` 的 `notifReceiver`），服务不认识协议。
+    **为什么宽到「界面在前台就挂」**：2026-10-18 用户实测 ——「撤掉通知之后系统很快就把进程掐了」；
+    而**后台里起前台服务会被系统拒绝**（`ForegroundServiceStartNotAllowedException`），
+    那一次失败没有第二次机会，等于整个会话都在裸奔。所以：进入前台（`onStart`/`onResume`）就补挂，
+    **挂不上不许静默** —— 原因写进「后台保活」卡片与「复制诊断」（`CaptureService.lastError`），
+    界面上一眼看出「通知没挂上」还是「会话正常结束」。
     另有「忽略电池优化」入口（`ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`）。
+    **通知权限（Android 13+ `POST_NOTIFICATIONS`）是保活的前提，必须可见可修**：声明 + 首启申请
+    （`requestPermissions`）、拒过一次再求一次（`maybeRequestNotifPermission`，靠
+    `shouldShowRequestPermissionRationale` 判断系统还肯不肯弹）；**再拒就永久静默** ——
+    此时唯一出路是设置页，所以「后台保活」卡片常驻一行「通知权限：已允许 / 没允许 / 渠道被关」
+    + 「通知设置」按钮（`ACTION_APP_NOTIFICATION_SETTINGS`，渠道单独被关时进
+    `ACTION_CHANNEL_NOTIFICATION_SETTINGS`）。用户 2026-10-18 反馈「从没见过通知权限弹窗」
+    就是这种状态：没有权限 = 没有通知 = 系统随手掐进程，而界面上什么都看不出来。
   - **应用内更新**（`update/{UpdateChecker,UpdateDownloader,UpdateInstaller}.kt`）：
     **手动**检查（不自动），数据源与本仓库 GitHub Releases 一致；比较依据是 tag 的完整时间戳
     映射出的 `yyMMddHHmm ÷ 10` 与安装包 `versionCode` 比整数（开发构建 `versionCode=1` → 不下结论）；

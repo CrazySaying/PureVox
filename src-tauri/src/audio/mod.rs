@@ -21,6 +21,7 @@
 
 pub mod capture;
 pub mod fanout;
+pub mod health;
 /// AEC 远端参考的输出回环采集（远端扬声器 → far 参考）。**实现按平台分文件**：
 /// `loopback_windows.rs`（WASAPI loopback）/ `loopback_linux.rs`（PipeWire monitor，`parec`）/
 /// `loopback_other.rs`（明确不可用）。
@@ -54,6 +55,15 @@ use crate::recorder::RecorderHub;
 pub const SAMPLE_RATE: u32 = 48_000;
 /// 10 ms hop，按时间派生（48 kHz 下 480 样本）。
 pub const HOP: usize = (SAMPLE_RATE / 100) as usize;
+
+/// Linux 上 Pulse / PipeWire 命令行工具（`parec` / `pacat` / `pactl`）缺失时的提示。
+///
+/// **只装了 PipeWire 的系统同样需要这个包**：`pipewire-pulse` 只提供兼容服务，而这些客户端
+/// 工具在 `pulseaudio-utils` 里（Ubuntu 26.04 默认就不装它，实测回环采集直接
+/// 「没有那个文件或目录」）。deb / rpm 已把它放进 `recommends`（apt/dnf 默认会装），
+/// AppImage 装不了系统包，所以运行时的报错必须说清**该装什么**。
+#[cfg(target_os = "linux")]
+pub const PULSE_TOOLS_HINT: &str = "缺少 PulseAudio 命令行工具（parec / pacat / pactl）：Debian / Ubuntu 装 pulseaudio-utils，Fedora 装 pulseaudio-utils";
 
 /// 打开设备时重试：Linux ALSA 的设备是**排他**的，而 cpal 关闭流是异步的
 /// （真正的 `snd_pcm_close` 在 cpal 内部线程上），重建会话时紧接着打开会得到

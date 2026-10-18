@@ -42,7 +42,10 @@ window.__pvDriversLinux = (() => {
     } else if (probe.state === 'ok') {
       els.sink.textContent = created(!!probe.value.sink)
       els.src.textContent = created(!!probe.value.source)
-      els.state.textContent = T('正常')
+      // 没有 pactl（pulseaudio-utils）时 sink 建得起来、**真源建不起来** —— 直接说清缺什么，
+      // 否则只看到一个「未创建」的源，无从下手（AGENTS.md：不静默失败）
+      els.state.textContent =
+        probe.value.pactl === false ? T('缺 pactl：装上 pulseaudio-utils 才有真源') : T('正常')
     } else {
       els.sink.textContent = '—'
       els.src.textContent = '—'

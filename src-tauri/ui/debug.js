@@ -61,6 +61,34 @@ function putFrom(el, parent, pick) {
   pick(el, parent.value)
 }
 
+// 结论：Rust 侧判定好的 {level, text}，这里只映射颜色（AGENTS 1.3：前端不自己算）
+function healthCell(p) {
+  if (!p) return [T('（无数据）'), 'na']
+  if (p.state !== 'ok') return probeText(p, () => '')
+  return [p.value.text, p.value.level === 'warn' ? 'warn' : 'ok']
+}
+function putHealth(el, p) {
+  const [t, c] = healthCell(p)
+  put(el, t, c)
+}
+
+// 实测速率还没采够一个窗口时不编数字（后缀留空，计数照显）
+function rateSuffix(r) {
+  return r && r.state === 'ok' ? r.value : null
+}
+// 累计计数 + 实测速率：累计值只会越涨越大，速率才看得出「现在还在不在发生」
+function countRate(p, r) {
+  const [t, c] = probeText(p, String)
+  const v = rateSuffix(r)
+  if (v === null || p.state !== 'ok') return [t, c]
+  return [`${t}  (${v.toFixed(1)}/s)`, c || (v > 0.5 ? 'warn' : '')]
+}
+function rawRate(n, r) {
+  const v = rateSuffix(r)
+  if (v === null) return [String(n), '']
+  return [`${n}  (${v.toFixed(1)}/s)`, v > 0.5 ? 'warn' : '']
+}
+
 // ---------- 调试列：应用 / 系统 / GPU ----------
 function renderApp(s) {
   put($('app-version'), s.app.version)
@@ -128,15 +156,18 @@ const labelOf = (l, s) => {
 
 /** @type {Array<[string | {in: string, out: string}, (s: any) => string[]]>} */
 const STREAM_FIELDS = [
+  ['结论', (s) => healthCell(s.health)],
   ['状态', (s) => probeText(s.state, (v) => v)],
   ['设备', (s) => [s.device_name, '']],
   ['格式', (s) => [`${s.sample_rate} Hz ${s.channels} ch ${s.sample_format}`, '']],
+  ['信号源', (s) => [s.source || '—', '']],
   ['重采样', (s) => [s.resampler, '']],
   ['设备侧速率', (s) => probeText(devRate(s), hz)],
   ['引擎侧速率', (s) => probeText(engRate(s), hz)],
   ['伺服修正', (s) => probeText(s.asrc_adjust_ppm, ppm)],
   ['重采样延迟', (s) => [ms(s.resampler_delay_ms), '']],
   ['回调块', (s) => probeText(s.callback_frames, (v) => T('最近 {last}  最小 {min}  最大 {max}', { last: v.last, min: v.min, max: v.max }))],
+  ['回调间隔', (s) => probeText(s.callback_frames, (v) => `${v.last_gap_ms.toFixed(1)} / ${v.max_gap_ms.toFixed(1)} ms`)],
   ['回调次数', (s) => [String(s.callbacks), '']],
   [isOutLabel('输入/输出帧', '消耗/设备帧'), (s) => [`${s.frames_in} / ${s.frames_processed}`, '']],
   ['hop/剩余', (s) => [`${s.hops} / ${s.pending_frames}`, s.pending_frames < 480 ? '' : 'na']],
@@ -150,9 +181,13 @@ const STREAM_FIELDS = [
     const [d] = probeText(s.device_buffer_ms, ms)
     return [`${ms(s.buffer_level_ms)}  /  ${d}`, '']
   }],
-  ['欠载', (s) => probeText(s.underruns, String)],
-  ['重同步', (s) => probeText(s.resyncs, String)],
-  ['丢弃/错误', (s) => [`${s.overruns} / ${s.stream_errors}${s.last_error ? '  ' + s.last_error : ''}`, s.overruns || s.stream_errors ? 'na' : '']],
+  ['欠载', (s) => countRate(s.underruns, s.underrun_per_s)],
+  ['重同步', (s) => countRate(s.resyncs, s.resync_per_s)],
+  ['丢弃', (s) => rawRate(s.overruns, s.overrun_per_s)],
+  ['错误', (s) => {
+    const [t, c] = rawRate(s.stream_errors, s.stream_error_per_s)
+    return [s.last_error ? `${t}  ${s.last_error}` : t, c]
+  }],
   ['端到端延迟', (s) => probeText(s.latency_ms, ms)],
   ['推理 均/最大', (s) => {
     const [a, c] = probeText(s.inference_ms_avg, ms)
@@ -291,6 +326,7 @@ function makeStreamCard(s) {
 
 function renderAudio(audio) {
   putProbe($('audio-engine'), audio.engine, (v) => v)
+  putHealth($('audio-verdict'), audio.verdict)
   const box = $('audio-streams')
   const ids = audio.streams.map((s) => s.id).join('|')
   if (box.dataset.ids !== ids) {
@@ -305,6 +341,38 @@ function renderAudio(audio) {
     drawWave(card.querySelector('.wave'), s.waveform)
     drawSpectrum(card.querySelector('.spec'), s.spectrum_db, s.spectrum_bin_hz, isOut(s) ? Infinity : s.sample_rate)
   })
+}
+
+// ---------- 网络（只读状态；开关 / 二维码 / 远程输入都在网络行卡片里，见 netrow.js）----------
+// 速率没采够一个窗口时写「采集中…」，不编数字（与音频流同一套约定）。
+function rateNum(p) {
+  const v = rateSuffix(p)
+  return v === null ? T('采集中…') : v.toFixed(1)
+}
+
+function renderNet(net) {
+  const svc = net.running ? T('已启动') : T('服务未启动')
+  const ri = net.remote_input ? T('已开启') : T('已关闭')
+  const rtt = net.rtt_ms == null ? T('（未测）') : net.rtt_ms.toFixed(1) + ' ms'
+  put(
+    $('net-status'),
+    `${T('服务')} ${svc} ｜ ${T('客户端 {n}，订阅 {m}', { n: net.clients, m: net.subs })} ｜ ` +
+      `${T('出站 {n} 包/s', { n: rateNum(net.tx_packets_per_s) })} ｜ ${T('进站 {n} 包/s', { n: rateNum(net.rx_packets_per_s) })} ｜ ` +
+      `${T('往返时延 {n}', { n: rtt })} ｜ ${T('远程输入')} ${ri}`,
+  )
+  // 逐路订阅水位：合计数看不出「是谁在拖」（AGENTS.md 1.2）
+  const subs = net.tx_subs
+    .map((x, i) => `${i + 1}# ${x.level_ms.toFixed(0)} ms` + (x.full ? T('（顶格）') : ''))
+    .join('  ')
+  const [dt, dc] = rawRate(net.tx_dropped, net.tx_dropped_per_s)
+  const [dr] = rawRate(net.rx_dropped, net.rx_dropped_per_s)
+  put(
+    $('net-subs'),
+    `${subs || T('没有订阅')} ｜ ${T('上限 {n} ms', { n: net.tx_cap_ms.toFixed(0) })} ｜ ${T('出站丢样本')} ${dt} ｜ ${T('进站丢样本')} ${dr}`,
+    dc,
+  )
+  putHealth($('net-verdict'), { state: 'ok', value: net.verdict })
+  putProbe($('net-codec'), net.codec, (v) => v)
 }
 
 // ---------- 轮询 ----------
@@ -324,6 +392,7 @@ async function tick() {
     renderGpu(s.system.gpu)
     renderAudio(s.audio)
     renderRecorder(s)
+    renderNet(s.net)
     if (window.__pvOnSnapshot) window.__pvOnSnapshot(s)
     put($('dbg-status'), '', '')
     if (!reported) {
@@ -347,6 +416,7 @@ document.addEventListener('pv-langchange', () => {
   renderGpu(last.system.gpu)
   renderAudio(last.audio)
   renderRecorder(last)
+  renderNet(last.net)
 })
 
 tick()
