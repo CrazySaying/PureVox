@@ -181,13 +181,7 @@ impl Outbound {
     let q = Arc::new(Mutex::new(HopQueue::default()));
     let dropped = Arc::new(AtomicU64::new(0));
     self.subs.lock().unwrap().push((id, q.clone()));
-    (
-      id,
-      OutboundSub {
-        q,
-        dropped,
-      },
-    )
+    (id, OutboundSub { q, dropped })
   }
 
   fn unsubscribe(&self, id: u64) {

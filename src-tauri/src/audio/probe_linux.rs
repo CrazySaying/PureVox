@@ -41,7 +41,10 @@ pub fn play(pcm: &[f32], target: Option<&str>) -> Result<(), String> {
       // 值直接复用回环那套（[`crate::audio::loopback::PARE_LATENCY_MS`]）—— 两处是同一个
       // 「这一路的固定延迟下限」问题，分开写两个常量必然漂移。
       &format!("--latency-msec={}", crate::audio::loopback::PARE_LATENCY_MS),
-      &format!("--process-time-msec={}", crate::audio::loopback::PARE_PROCESS_MS),
+      &format!(
+        "--process-time-msec={}",
+        crate::audio::loopback::PARE_PROCESS_MS
+      ),
     ])
     .stdin(Stdio::piped())
     .stdout(Stdio::null())
