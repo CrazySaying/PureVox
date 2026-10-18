@@ -97,12 +97,16 @@ def main() -> int:
     tag = f"v{y}.{mo2}.{d2}.{hm4}"
     ver = f"{yy}.{mo}.{d}"                      # 显示版本：整数，不补零（26.9.9）
     stamp = f"{y}-{mo2}-{d2}-{hm4}"             # 文件名形式
-    acode = int(f"{yy:02d}{mo2}{d2}{hm4}") // 10    # Android versionCode，见下
+    acode = (
+        int(yy) * 10**7 + mo * 10**5 + d * 10**3 + hm // 10
+    )  # Android versionCode，见下；定长补零靠乘 10 的幂（与应用侧逐字同构）
     # **÷10 不能省**：versionCode 是 Int32（上限 2147483647），十位数的 `yyMMddHHmm`
     # （2610172359 ≈ 2.6e9）装不进去 —— 传过去会**静默溢出**：Gradle 侧 `toIntOrNull()`
     # 返回 null、回退成 1，CI 全绿却发出一个「永远报开发构建」的 APK（2026-10-17 实测踩到：
     # versionName=26.10.17 / versionCode=1）。去掉最低一位即 10 分钟粒度：顺序仍单调，
     # 上限 991231235 永不溢出；撞号要两个 tag 落在同一 10 分钟内，而一次发版 CI 就要 20 分钟。
+    # 拼法是**乘 10 的幂**而不是 `String.format`：应用侧 Kotlin 的 `%d` 按默认 locale 出数字，
+    # 阿拉伯语等 locale 会给非 ASCII 数字（那条链同样只有一条实现，两侧必须一模一样）。
     if not 0 < acode <= _VERSION_CODE_MAX:
         raise SystemExit(f"ACODE 越界（{acode}，tag {tag}）：versionCode 是 Int32")
 

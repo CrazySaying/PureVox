@@ -109,13 +109,16 @@ object UpdateChecker {
     /**
      * `v2026.10.08.1430` → `261008143`（= `ACODE`）。格式不对 / 越界返回 `null`。
      *
-     * **必须补零再拼**：先在**定长十位**上拼出 `yyMMddHHmm`（`26` + `10` + `08` + `1430`），
-     * 再整除 10；若按整数去前导零拼会得到 `26108 1430` 这种位数不定的串，与安装包的值不可比。
+     * 与 `version.py` **逐字同构**：各字段**定长**（月/日/时分补零）后按十进权位拼
+     * `yyMMddHHmm`，再整除 10。定长靠**乘 10 的幂**实现，**不用 `String.format`** ——
+     * 后者按**默认 locale** 出数字，阿拉伯语等 locale 给的是非 ASCII 数字，`.toLong()`
+     * 直接抛异常（旧代码同样踩这个坑，只是表现为返回 null 的静默失败）。
+     * 去前导零拼（`26` + `10` + `8` + `1430`）同样错：位数不定，与安装包的值不可比。
      *
      * **÷10 不能省**：十位的 `2610172359`（2.6e9）超过 versionCode 的 Int32 上限
      * 2147483647 —— 溢出成 `null` 的表现是**整条链静默失效**：Gradle 侧退回 `versionCode=1`，
      * 应用侧认不出 release（报「没有可用的 APK 资产」），2026-10-17 实测踩到。÷10 后是
-     * 10 分钟粒度、单调、上限 991231235，与 `version.py` 逐字一致。
+     * 10 分钟粒度、单调、上限 991231235，与 `version.py` 一致。
      */
     fun stampToCode(tag: String): Int? {
         val t = tag.trim().removePrefix("v")
@@ -128,7 +131,8 @@ object UpdateChecker {
         if (mo !in 1..12 || d !in 1..31 || hm !in 0..2359) return null
         if (hm % 100 > 59) return null // 2359 合法，2360 不合法
         val yy = y % 100
-        val code = "%02d%02d%02d%04d".format(yy, mo, d, hm).toLong() / 10L
+        // yy(2) · MM(2) · dd(2) · HHmm(4) → 去掉最后一位
+        val code = yy * 10_000_000L + mo * 100_000L + d * 1_000L + hm / 10
         if (code !in 1..MAX_VERSION_CODE) return null
         return code.toInt()
     }
