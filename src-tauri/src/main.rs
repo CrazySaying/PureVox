@@ -129,6 +129,19 @@ async fn apply_plan(
   Ok(problems)
 }
 
+/// 改一个**行级热参数**（与模型无关的标量：增益 / 音量）：**不重建会话**，下一 hop 生效。
+/// 界面按注册表的 `is_hot` 决定走这条路还是 `apply_plan`（见 `engine/hot.rs` 的说明）。
+#[tauri::command]
+fn set_row_param(
+  col: usize,
+  row: usize,
+  key: String,
+  value: String,
+  mgr: tauri::State<'_, Arc<AudioManager>>,
+) -> Result<(), String> {
+  mgr.set_row_param(col, row, &key, &value)
+}
+
 /// 热参数落盘（不重建会话）：音量 / 续播位置等改动用它 + 对应的媒体运行时命令
 /// （DESIGN.md §5：热参数下发给运行中的实例，不重启）。
 #[tauri::command]
@@ -233,6 +246,9 @@ struct ParamInfo {
   max: Option<f64>,
   #[serde(skip_serializing_if = "Option::is_none")]
   step: Option<f64>,
+  /// 是否**热参数**（改它不重建会话，见 `engine/hot.rs`）：界面照它选
+  /// `set_row_param` 还是 `apply_plan`。
+  hot: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -270,6 +286,7 @@ fn list_nodes() -> Vec<NodeInfo> {
             min,
             max,
             step,
+            hot: engine::registry::is_hot(s.ptype, p.key),
           }
         })
         .collect(),
@@ -684,6 +701,7 @@ fn main() {
       get_plan,
       apply_plan,
       persist_plan,
+      set_row_param,
       media_import,
       media_discard,
       media_command,

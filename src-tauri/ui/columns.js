@@ -181,7 +181,12 @@ function farOptions(selected) {
 }
 
 // 处理行的参数控件：`keys` 限定只渲染部分参数（TSE 分两行摆）；model 用型号下拉，其余文本框
-function paramControls(row, keys) {
+//
+// **热参数**（注册表标了 `hot`：增益 / 音量）走 `set_row_param`：拖/敲就实时生效，
+// **不重建会话**（重建要关掉全部设备再重开，Linux 上几百毫秒起步）。其余的仍然走
+// `apply_plan` 全量重建 —— 哪些算热参数由后端注册表说了算（`registry::is_hot`），
+// 界面不自己判。
+function paramControls(row, ci, ri, keys) {
   const spec = specOf(row.ptype)
   const box = document.createElement('span')
   box.className = 'params'
@@ -205,10 +210,20 @@ function paramControls(row, keys) {
       if (p.max != null) input.max = String(p.max)
       if (p.step != null) input.step = String(p.step)
       input.value = row.params[p.key] ?? p.default
-      input.addEventListener('change', () => {
-        row.params[p.key] = input.value
-        apply()
-      })
+      if (p.hot) {
+        input.addEventListener('input', () => {
+          row.params[p.key] = input.value
+          invoke('set_row_param', { col: ci, row: ri, key: p.key, value: input.value }).catch((e) => {
+            setStatus([String(e)])
+            window.__pvDebug?.('热参数失败：' + e)
+          })
+        })
+      } else {
+        input.addEventListener('change', () => {
+          row.params[p.key] = input.value
+          apply()
+        })
+      }
       box.appendChild(input)
     } else {
       const input = document.createElement('input')
@@ -311,7 +326,7 @@ function rowElement(col, ci, row, ri) {
     })
     lab.append(cb, document.createTextNode(T('启用')))
     detail.appendChild(lab)
-    detail.appendChild(paramControls(row, row.ptype === 'tse' ? ['model'] : undefined))
+    detail.appendChild(paramControls(row, ci, ri, row.ptype === 'tse' ? ['model'] : undefined))
   } else if (kind === 'input' && row.ptype === 'echo_cancel') {
     // 近端 mic + 直通开关；远端 + 端侧增益在第 3 行
     detail.appendChild(lbl(T('近端')))
@@ -338,7 +353,7 @@ function rowElement(col, ci, row, ri) {
       row.device = v
       apply()
     }))
-    detail.appendChild(paramControls(row, ['volume_db']))
+    detail.appendChild(paramControls(row, ci, ri, ['volume_db']))
   } else if (kind === 'input' && row.ptype === 'remote_mic' ||
              kind === 'output' && row.ptype === 'remote_speaker') {
     // 网络行：**不画任何通用控件**。整张卡片由 `netrow.js` 提供，且刻意做得很小 ——
@@ -425,7 +440,7 @@ function rowElement(col, ci, row, ri) {
   if (kind === 'process' && row.ptype === 'tse') {
     const d2 = document.createElement('div')
     d2.className = 'detail2'
-    d2.appendChild(paramControls(row, ['reference']))
+    d2.appendChild(paramControls(row, ci, ri, ['reference']))
     const rec = document.createElement('button')
     rec.type = 'button'
     rec.textContent = T('录制参考')

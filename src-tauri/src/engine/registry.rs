@@ -75,6 +75,39 @@ pub struct NodeSpec {
   pub params: &'static [ParamSpec],
 }
 
+/// 这个参数是**热参数**吗（运行中改它只需写一个原子单元格，**不重建会话**）？
+///
+/// 判据是「与模型无关 + 每 hop 读一次的标量」，`HotGain` 是唯一实现（`engine/hot.rs`）：
+/// - `gain` 行的 `gain_db`、`loopback` 行的 `volume_db` —— 纯乘一个倍数，改完下一 hop 就是新值；
+/// - **模型 / 设备 / 参考音频 / 音效列表 / 远端设备**都不是：它们决定会话怎么搭、模型怎么加载，
+///   必须走 `apply_plan` 重建（界面照这个函数选路径，故判定只有这一处）。
+///
+/// 动机（2026-10-18）：以前**所有**参数改动都走 `apply_plan` 全量重建，改增益每 1 dB 重建一次
+/// —— Linux 上 ALSA 排他、一次重建几百毫秒起步（2 列撞同一张卡时实测 7.25 s/次），
+/// 命令队列越堆越长，表现是「改音量卡死、连停止都点不动」。
+pub fn is_hot(ptype: &str, key: &str) -> bool {
+  matches!(
+    (ptype, key),
+    ("gain", "gain_db") | ("loopback", "volume_db")
+  )
+}
+
+/// 参数取值约束（[`ParamKind::Number`] 的上下限 / 默认值），热参数写值前用它校验。
+pub fn number_spec(ptype: &str, key: &str) -> Option<(f64, f64, f64)> {
+  all_specs()
+    .iter()
+    .find(|s| s.ptype == ptype)?
+    .params
+    .iter()
+    .find(|p| p.key == key)
+    .and_then(|p| match p.kind {
+      ParamKind::Number {
+        lo, hi, default, ..
+      } => Some((lo, hi, default)),
+      _ => None,
+    })
+}
+
 static SPECS: &[NodeSpec] = &[
   // 输入行（源）
   NodeSpec {
@@ -320,10 +353,12 @@ pub fn get_spec(ptype: &str) -> Option<&'static NodeSpec> {
 
 /// 实例化处理类组件（输入/输出/可视化不是 Stage，由 L0 实现）。
 /// `media`：音效板 / 播放器的媒体槽位（运行时命令通道，见 `engine::media`）。
+/// `hot`：热参数登记口（只有带热参数的行会用；见 [`crate::engine::hot`]）。
 pub fn create_stage(
   ptype: &str,
   params: &Params,
   media: Option<std::sync::Arc<super::media::MediaSlot>>,
+  hot: &mut super::hot::HotSink,
 ) -> Result<Box<dyn Stage>, String> {
   let spec = get_spec(ptype).ok_or_else(|| format!("未知节点类型 {ptype}"))?;
   match spec.ptype {
@@ -356,7 +391,9 @@ pub fn create_stage(
         Some(ParamValue::Text(t)) => t.trim().parse().unwrap_or(0.0),
         _ => 0.0,
       };
-      Ok(Box::new(super::components::gain::GainStage::load(db)))
+      // 热参数：增益单元格交给会话登记（界面改它 = 写这个单元格，不重建会话）
+      let cell = hot.gain("gain_db", db);
+      Ok(Box::new(super::components::gain::GainStage::new(cell)))
     }
     "soundpad" => {
       let slot = media.ok_or_else(|| "音效板缺少媒体槽位（内部错误）".to_string())?;

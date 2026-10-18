@@ -71,8 +71,9 @@ struct Row {
   ring_dropped: u64,
   /// 行输入环丢弃的实测速率（3 s 窗口；累计只涨不降，速率才看得出还在不在丢）
   ring_drop_rate: RateMeter,
-  /// 输入行（loopback）：行内增益（系统混音偏响，默认 -6 dB）
-  gain: Option<f32>,
+  /// 输入行（loopback）：行内增益（系统混音偏响，默认 -6 dB）——**热参数**
+  /// （`engine/hot.rs`：界面改它只写这个单元格，不重建会话）
+  gain: Option<Arc<crate::engine::hot::HotGain>>,
   /// AEC 输入行：mic 读端 + far 历史 + 本行模型状态
   aec: Option<AecRow>,
   /// `remote_mic` 输入行：网络入站队列（DESIGN.md §4.1）
@@ -101,6 +102,9 @@ pub struct Session {
   columns: Vec<ColumnRuntime>,
   publisher_stop: Arc<AtomicBool>,
   publisher: Option<JoinHandle<()>>,
+  /// 热参数单元格：`(列, 行, 参数名) → 值`。`set_hot_param` 写它，行工作线程下一 hop 生效
+  /// （见 `engine/hot.rs`：热参数**不重建会话**）。
+  hot: std::collections::HashMap<(usize, usize, String), Arc<crate::engine::hot::HotGain>>,
 }
 
 impl Session {
@@ -115,8 +119,17 @@ impl Session {
     // 媒体槽位按 (列,行) 重建：先清空旧会话的注册，避免行被删后残留
     media::hub().clear();
     let mut columns = Vec::new();
+    let mut hot = std::collections::HashMap::new();
     for (i, spec) in plan.columns.iter().enumerate() {
-      columns.push(build_column(&hub, i, spec, &mut problems, &rec, &calib));
+      columns.push(build_column(
+        &hub,
+        i,
+        spec,
+        &mut problems,
+        &rec,
+        &calib,
+        &mut hot,
+      ));
     }
 
     // 汇总各列概要，定期发布到调试接口
@@ -142,9 +155,18 @@ impl Session {
         columns,
         publisher_stop,
         publisher,
+        hot,
       },
       problems,
     )
+  }
+
+  /// 运行中改一个热参数（见 `engine/hot.rs`）：写单元格，行工作线程**下一 hop**生效。
+  /// 计划里没有这个 `(列,行,参数名)` → `None`（调用方据此报「这一行没有这个热参数」）。
+  pub fn set_hot_param(&self, col: usize, row: usize, key: &str, value: f32) -> Option<()> {
+    let cell = self.hot.get(&(col, row, key.to_string()))?;
+    cell.set_db(value);
+    Some(())
   }
 
   pub fn stop(&mut self) {
@@ -383,6 +405,7 @@ fn build_column(
   problems: &mut Vec<String>,
   rec: &Arc<RecorderHub>,
   calib: &Arc<CalibHub>,
+  hot: &mut std::collections::HashMap<(usize, usize, String), Arc<crate::engine::hot::HotGain>>,
 ) -> ColumnRuntime {
   let mut rows: Vec<Row> = Vec::new();
   let mut captures = Vec::new();
@@ -391,6 +414,8 @@ fn build_column(
   let mut remote_mic_used = false;
 
   for (ri, r) in spec.rows.iter().enumerate() {
+    // 热参数登记口：本行建出来的单元格（增益 / 音量）收进会话，供运行中改值
+    let mut sink = crate::engine::hot::HotSink::new();
     let mut row = Row {
       kind: r.kind,
       label: r.ptype.clone(),
@@ -567,7 +592,7 @@ fn build_column(
           .get("volume_db")
           .and_then(|v| v.trim().parse().ok())
           .unwrap_or(-6.0);
-        row.gain = Some(10f32.powf((db / 20.0) as f32));
+        row.gain = Some(sink.gain("volume_db", db));
         let target = match device {
           None => None,
           Some(d) if d == "loopback" || d.is_empty() => None,
@@ -612,7 +637,7 @@ fn build_column(
           _ => None,
         };
         row.media_slot = slot.clone();
-        match registry::create_stage(&r.ptype, &to_params(&r.params), slot) {
+        match registry::create_stage(&r.ptype, &to_params(&r.params), slot, &mut sink) {
           Ok(st) => {
             row.label = registry::get_spec(&r.ptype)
               .map(|s| s.label.to_string())
@@ -652,6 +677,10 @@ fn build_column(
     }
     if let Some(e) = &row.error {
       problems.push(format!("第 {} 列第 {} 行：{e}", idx + 1, ri + 1));
+    }
+    // 热参数单元格收进会话（(列,行,参数名) 寻址；见 `engine/hot.rs`）
+    for (key, cell) in sink.take() {
+      hot.insert((idx, ri, key), cell);
     }
     rows.push(row);
   }
@@ -818,7 +847,8 @@ fn run_column(
               r.ring_dropped += dropped as u64;
               if got {
                 // 行内增益（loopback 源：系统混音偏响）
-                if let Some(g) = r.gain {
+                if let Some(g) = r.gain.as_ref() {
+                  let g = g.linear();
                   for x in tmp.iter_mut() {
                     *x *= g;
                   }

@@ -128,7 +128,13 @@ release 构建同样保留（不允许用编译开关剔除）。
   是 VB-CABLE 驱动下载 / 视频教程 / 有无检测。两平台实现分文件，外壳 `ui/drivers.js` 按 `get_platform` 切，
   按钮与面板位置、布局一致。
 - **会话入口**：计划（`plan.rs`）+ 配置（`config.rs`，存 `~/.purevox/session.json`）→ 命令
-  `get_plan` / `apply_plan`（结构性变更 → 重建整个会话）。列 UI（`ui/columns.js`）编辑计划：
+  `get_plan` / `apply_plan`（结构性变更 → 重建整个会话）。
+  **行级热参数**（与模型无关的标量：`gain` 行的 `gain_db`、`loopback` 行的 `volume_db`）走命令
+  `set_row_param` + `engine/hot.rs` 的 `HotGain` 原子单元格：**不重建会话**、下一 hop 生效；
+  判定唯一来源 `registry::is_hot`，界面（`ui/columns.js` 的 `p.hot`）照它选路径。
+  **别把它并回 `apply_plan`**：全量重建要关掉全部设备再重开，Linux 上 ALSA 排他、几百毫秒起步
+  （2 列撞同一张卡实测 7.25 s/次），改增益每 1 dB 重建一次会把命令队列堆死
+  —— 用户看到的就是「改音量卡死、连停止都点不动」（2026-10-18 实测）。列 UI（`ui/columns.js`）编辑计划：
   每列两端固定为输入/输出、中间可加/删/移行；输入/输出行选设备，处理行选型号。
   测试音是输入行的一种（`ptype = tone`，全局共享线程）。
 - **会话重建 / 设备打开（Linux ALSA 排他）**：同一声卡同一设备**不能被打开两次**，而 cpal 关流

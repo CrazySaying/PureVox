@@ -15,21 +15,24 @@
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! 增益组件（DESIGN.md §4 处理行）：就地乘一个固定增益（dB）。不做限幅/AGC。
+//! 增益组件（DESIGN.md §4 处理行）：就地乘一个增益（dB）。不做限幅/AGC。
+//!
+//! **热参数**：增益单元格是 [`HotGain`]（`engine/hot.rs`），[`Stage::process`] 每 hop 读一次
+//! —— 界面拖动增益**不重建会话**，下一 hop 就是新值。
 
+use std::sync::Arc;
+
+use crate::engine::hot::HotGain;
 use crate::engine::stage::{FrameContext, Stage, StageError};
 
 pub struct GainStage {
-  gain: f32,
-  db: f64,
+  gain: Arc<HotGain>,
 }
 
 impl GainStage {
-  pub fn load(db: f64) -> Self {
-    GainStage {
-      gain: 10f32.powf((db / 20.0) as f32),
-      db,
-    }
+  /// 用会话里登记过的热参数单元格建（同一份单元格也会发给界面改值用）。
+  pub fn new(gain: Arc<HotGain>) -> Self {
+    GainStage { gain }
   }
 }
 
@@ -39,12 +42,13 @@ impl Stage for GainStage {
   }
 
   fn status(&self) -> Option<String> {
-    Some(format!("增益 {:+.1} dB", self.db))
+    Some(format!("增益 {:+.1} dB", self.gain.db()))
   }
 
   fn process(&mut self, frame: &mut [f32], _ctx: &FrameContext) -> Result<(), StageError> {
+    let k = self.gain.linear();
     for x in frame.iter_mut() {
-      *x *= self.gain;
+      *x *= k;
     }
     Ok(())
   }

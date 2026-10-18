@@ -389,6 +389,72 @@ impl AudioManager {
     Ok(problems)
   }
 
+  /// 运行中改一个**热参数**（与模型无关的标量：`gain` 行的 `gain_db`、`loopback` 行的
+  /// `volume_db`，见 `engine/hot.rs`）：写进计划并落盘，运行中的会话**不重建**、下一 hop 生效。
+  ///
+  /// 为什么要有这条路：从前**所有**参数改动都走 [`apply_plan`]，而 `apply_plan` 是结构性
+  /// 重建（关掉全部设备再重开）。Linux 上 ALSA 排他、一次重建几百毫秒起步（2 列撞同一张卡
+  /// 时实测 7.25 s），界面按每个 `change` 事件调一次 —— 改增益每 1 dB 重建一次，命令队列
+  /// 越堆越长，表现就是「改音量卡死、连停止都点不动」（2026-10-18 用户实测）。
+  ///
+  /// 结构性参数（模型 / 设备 / 参考音频…）**不许**走这里：调用方照
+  /// [`crate::engine::registry::is_hot`] 决定走哪条路，本函数也自己把这道门守住。
+  pub fn set_row_param(
+    &self,
+    col: usize,
+    row: usize,
+    key: &str,
+    value: &str,
+  ) -> Result<(), String> {
+    let ptype = {
+      let g = self.state.lock().unwrap();
+      let r = g
+        .plan
+        .columns
+        .get(col)
+        .and_then(|c| c.rows.get(row))
+        .ok_or_else(|| format!("计划里没有第 {} 列第 {} 行", col + 1, row + 1))?;
+      if !crate::engine::registry::is_hot(&r.ptype, key) {
+        return Err(format!(
+          "{} 的 {key} 不是热参数（要重建会话：走 apply_plan）",
+          r.ptype
+        ));
+      }
+      r.ptype.clone()
+    };
+    // 取值约束来自注册表（界面有 min/max，后端不能信界面）
+    let (lo, hi, _) = crate::engine::registry::number_spec(&ptype, key)
+      .ok_or_else(|| format!("{ptype} 的 {key} 不是数值参数"))?;
+    let db: f64 = value
+      .trim()
+      .parse()
+      .map_err(|_| format!("{key} 取值不是数字：{value}"))?;
+    if !db.is_finite() || db < lo || db > hi {
+      return Err(format!("{key} 必须在 {lo} ~ {hi} 之间，收到 {value}"));
+    }
+    let db = db as f32;
+
+    let mut g = self.state.lock().unwrap();
+    if let Some(r) = g
+      .plan
+      .columns
+      .get_mut(col)
+      .and_then(|c| c.rows.get_mut(row))
+    {
+      r.params.insert(key.to_string(), value.trim().to_string());
+    }
+    let plan = g.plan.clone();
+    let _ = config::save_plan(&plan);
+    match g.session.as_ref() {
+      // 运行中：写单元格（**不重建**）。会话里没登记这个热参数 = 内部不一致，说清楚。
+      Some(s) => s
+        .set_hot_param(col, row, key, db)
+        .ok_or_else(|| format!("第 {} 列第 {} 行没有登记热参数 {key}", col + 1, row + 1)),
+      // 没在跑：只落盘，下次启动生效
+      None => Ok(()),
+    }
+  }
+
   /// 热参数落盘（**不重建会话**，DESIGN.md §5）：音量 / 续播位置等改动用它。
   /// 同时更新内存计划，保证 `get_plan` 与运行中实例一致。
   pub fn persist_plan(&self, plan: Plan) -> Result<(), String> {
@@ -459,6 +525,80 @@ mod tests {
       !m.is_running(),
       "临时会话测完必须停回未运行，不能一直占着音频设备"
     );
+  }
+
+  /// 带一条 `gain` 处理行的计划：热参数测试用（`tone` 输入不需要设备，输出行不配置即可）。
+  fn plan_with_gain(db: &str) -> Plan {
+    use crate::plan::{ColumnSpec, RowKind, RowSpec};
+    let row = |kind, ptype: &str, params: Vec<(&str, &str)>| RowSpec {
+      kind,
+      ptype: ptype.into(),
+      device: None,
+      enabled: true,
+      params: params
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect(),
+    };
+    Plan {
+      columns: vec![ColumnSpec {
+        rows: vec![
+          row(RowKind::Input, "tone", vec![]),
+          row(RowKind::Process, "gain", vec![("gain_db", db)]),
+          row(RowKind::Output, "audio_output", vec![]),
+        ],
+      }],
+    }
+  }
+
+  /// **热参数**（`gain_db` / `volume_db`）走 `set_row_param`：只写计划 + 写单元格，
+  /// **不重建会话**；结构性参数（模型/设备…）一律拒绝，且拒绝要说清原因。
+  ///
+  /// 动机：以前所有参数都走 `apply_plan` 全量重建，改增益每 1 dB 重建一次 ——
+  /// Linux 上 ALSA 排他，一次重建几百毫秒起步（2 列撞同一张卡时实测 7.25 s），
+  /// 队列越堆越长，表现就是「改音量卡死、连停止都点不动」。
+  #[test]
+  fn set_row_param_only_accepts_hot_scalars() {
+    let m = mgr();
+    m.apply_plan(plan_with_gain("0")).expect("写计划");
+    // 未运行也能改（只落盘，下次启动生效）
+    m.set_row_param(0, 1, "gain_db", "-6").expect("热参数");
+    let saved = crate::config::load_plan();
+    assert_eq!(
+      saved.columns[0].rows[1]
+        .params
+        .get("gain_db")
+        .map(|s| s.as_str()),
+      Some("-6"),
+      "热参数要落盘"
+    );
+    // 结构性参数不许走这条路
+    let e = m.set_row_param(0, 1, "model", "x").unwrap_err();
+    assert!(e.contains("不是热参数"), "要说清为什么不行：{e}");
+    // 取值范围由注册表说了算（界面有 min/max，后端不能信界面）
+    assert!(m.set_row_param(0, 1, "gain_db", "999").is_err(), "越界拒绝");
+    assert!(
+      m.set_row_param(0, 1, "gain_db", "abc").is_err(),
+      "非数字拒绝"
+    );
+    assert!(
+      m.set_row_param(0, 9, "gain_db", "0").is_err(),
+      "行号越界拒绝"
+    );
+  }
+
+  /// 运行中改热参数要**落到会话的单元格**（`Session::set_hot_param` 的寻址没接错）。
+  /// 会话里没登记这个参数时报明确的内部错误，而不是静默成功。
+  #[test]
+  fn set_row_param_reaches_running_session() {
+    let m = mgr();
+    m.apply_plan(plan_with_gain("0")).expect("写计划");
+    m.start().expect("启动会话");
+    assert!(
+      m.set_row_param(0, 1, "gain_db", "-6").is_ok(),
+      "运行中的 gain 行必须登记了热参数单元格"
+    );
+    m.stop();
   }
 
   /// 校准**不必先手动启动**：没有 AEC 行时报的是「没有 AEC 行」而不是「会话未运行」，

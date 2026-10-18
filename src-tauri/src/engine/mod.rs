@@ -22,6 +22,8 @@
 pub mod aec;
 pub mod calib;
 pub mod components;
+/// 热参数（与模型无关的标量：增益 / 音量）—— 运行中改它不重建会话
+pub mod hot;
 /// 媒体控制中枢（音效板 / 播放器的运行时命令与状态，DESIGN.md §4）
 pub mod media;
 pub mod pipeline;
