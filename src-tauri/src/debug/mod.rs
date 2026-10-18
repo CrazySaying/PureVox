@@ -136,7 +136,9 @@ pub struct StreamInfo {
   pub rms_dbfs: Probe<f32>,
   /// 输出流：设备回调取不到数据而补静音的样本数（预热完成后才计）
   pub underruns: Probe<u64>,
-  /// 输入流：环形缓冲满丢弃的样本数；输出流：48k 缓冲超过封顶丢弃的最旧样本数
+  /// 输入流：设备环丢最旧 —— 环满（回调侧）+ **延迟封顶**（[`crate::audio::capture`]
+  /// 的 `DEV_MAX_MS`，超过硬顶的过时音频直接丢，不慢慢放出去）；
+  /// 输出流：48k 缓冲超过封顶丢弃的最旧样本数
   pub overruns: u64,
   /// 输出流：信号源断流后静音并重新预热的次数
   pub resyncs: Probe<u64>,

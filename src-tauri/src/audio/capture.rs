@@ -45,12 +45,25 @@ pub struct Capture {
 
 pub(super) const PUBLISH_PERIOD: Duration = Duration::from_millis(200);
 const POLL_PERIOD: Duration = Duration::from_millis(5);
-/// 放行网格：与列工作线程同一套 10 ms 节拍（DESIGN.md §3.3）。
-const RELEASE_GRID: Duration = Duration::from_millis(10);
-/// 行输入环（fanout 环）的目标垫层：2 hop（DESIGN.md §3.3「输入环目标 2 hop」）。
-const DOWNSTREAM_TARGET_HOPS: usize = 2;
-/// 设备环积压上限（ms）：超过就按 2× 实时追平（源比标称快，或下游停摆）。
-const DEV_BACKLOG_MS: usize = 300;
+/// 设备环**目标水位**（ms）：延迟封顶（[`DEV_MAX_MS`]）触发时保留这么多，其余丢掉。
+/// 取一格（10 ms）：保留垫层只为吸收本线程 5 ms 的轮询抖动，不参与「攒延迟」。
+const DEV_TARGET_MS: usize = 10;
+/// 设备环**硬顶**（ms）：超过就丢最旧到 [`DEV_TARGET_MS`]。
+///
+/// **这一条是本路源的延迟硬保证**，也是 v18 缺失的那一条。超硬顶的样本是
+/// **已经过时的音频**（流刚打开时设备预填的一大块、会话重建期间的积压、调度停顿），
+/// 正确动作是**丢掉、跳到现在**；不是「按 2× 慢慢放出去」—— 那等于把一次突发变成
+/// 「之后十几秒都在听旧声音」。实测（2026-10-18，单列 D80 麦克风）：v18 把它当待播数据，
+/// 设备环长期停在 **289 ms**（唯一出口是 300 ms 那道闸，而放行速率恰好等于源速率，
+/// 水位是随机游走、只进不出）；硬顶改成 60 ms 后同一条链回到 10 ms 量级。
+///
+/// 60 ms 的依据：必须**高于正常回调块**，否则每个块都要丢一次 —— cpal 实测块
+/// 5~21 ms（本机 PipeWire 241 帧 = 5 ms）、`parec` 块 = [`super::loopback::PARE_LATENCY_MS`]
+/// （30 ms）。块比硬顶还大的源要压的是**源自己的缓冲**，不是抬高这个值。
+const DEV_MAX_MS: usize = 60;
+/// 单拍放行上限（格）：恒等于实时 —— 突发源的整块因此被摊成平滑 hop 流，
+/// 不会把下游 10 ms 级的有界环一次冲爆（`ROW_CAP` 丢最旧，听感是规律地卡）。
+const RELEASE_SLOTS: usize = 1;
 pub(super) const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 /// 超过此时长没有回调即判定流已停止（设备拔出、驱动异常等）。
 pub(super) const STALL_LIMIT: Duration = Duration::from_secs(1);
@@ -334,6 +347,36 @@ pub(super) struct WorkerSrc<K> {
   pub stop: Arc<AtomicBool>,
 }
 
+/// 延迟封顶要丢掉的样本数（纯函数）：环里超过 [`DEV_MAX_MS`] 的部分丢最旧到
+/// [`DEV_TARGET_MS`]，返回丢弃样本数（0 = 没超）。
+fn clamp_excess(n: usize, slot_frames: usize) -> usize {
+  let max = DEV_MAX_MS / 10 * slot_frames;
+  if n <= max {
+    0
+  } else {
+    n - DEV_TARGET_MS / 10 * slot_frames
+  }
+}
+
+/// 实时预算放行（纯函数）：把「距上次结算经过的时间」折算成样本累加进 `budget`
+/// （上限 [`RELEASE_SLOTS`] 格），返回本拍放行样本数并从 `budget` 里扣掉。
+///
+/// **只看本路自己的时钟** —— 不看下游水位、不看别的列。放行速率恒等于源标称速率，
+/// 于是「一大块到达」的源被摊平，而水位不会因为某个消费者慢/某一列重建而被垫高。
+fn release_realtime(
+  n: usize,
+  budget: &mut f64,
+  dt: f64,
+  native_rate: f64,
+  slot_frames: usize,
+) -> usize {
+  let cap = (RELEASE_SLOTS * slot_frames) as f64;
+  *budget = (*budget + dt * native_rate).min(cap);
+  let take = n.min(*budget as usize);
+  *budget -= take as f64;
+  take
+}
+
 /// 工作循环：读环 → 重采样切 hop → 计量 → 发布 → 推扇出。
 /// `src.keep` 在循环期间保活（cpal 流 / WASAPI 轮询线程）；`src.stats` 由数据源侧更新。
 pub(super) fn worker<K>(
@@ -372,53 +415,57 @@ pub(super) fn worker<K>(
   let mut hops: u64 = 0;
   let mut resample_error: Option<String> = None;
   let mut last_publish = Instant::now() - PUBLISH_PERIOD;
-  // 放行节拍状态：一格 = 10 ms 的原生样本量
+  // 一格 = 10 ms 的原生样本量；放行预算与「上次结算时刻」是**这一路自己的时钟**
   let slot_frames = (native_rate as usize / 100).max(1);
-  let mut next_release = Instant::now();
+  let mut budget: f64 = 0.0;
+  let mut last_budget = Instant::now();
+  // 延迟封顶丢掉的样本数：进 overruns（+ 速率），面板上看得见（丢了不报只剩一句「声音卡」）
+  let mut clamped: u64 = 0;
 
   while !stop.load(Relaxed) {
-    let n = cons.slots();
-    let ring_level_ms = n as f32 * 1000.0 / native_rate as f32;
     let now = Instant::now();
-    // ---- 放行节拍 ----
-    // 源可能「一大块到达」：Linux `parec` 一次 100 ms（4800 样本，实测 `callback_frames`
-    // 就是 4800/4800/4800）。整块顺着往下推不行——下游全是 10 ms 级的有界环，块会把
-    // 「行输入环」一次灌满、又在块与块的接缝上被抽干 → 列工作线程每个块边界饿一格 →
-    // 听感是**规律的咔咔声**（2026-10-18 实测：手机端每秒约 10 次卡顿）。
-    // 所以按 10 ms 网格放行，且只在「下游缺料」或「设备环积压」时放：整块留在设备环里
-    // 当垫层，下游拿到的是一格一格的平滑 hop 流。
-    if n > 0 && now >= next_release {
-      // 落后太多就重新对齐（不追赶式突发）；正常情况对齐到 10 ms 网格
-      next_release = if now.duration_since(next_release) > RELEASE_GRID * 4 {
-        now + RELEASE_GRID
-      } else {
-        next_release + RELEASE_GRID
-      };
-      let backlog = n > slot_frames * DEV_BACKLOG_MS / 10;
-      let starved = fanout.min_level() < DOWNSTREAM_TARGET_HOPS * HOP;
-      // 积压时按 2× 实时放（源比标称快 / 下游停摆），否则一格
-      let cap = if backlog {
-        slot_frames * 2
-      } else {
-        slot_frames
-      };
-      let take = if backlog || starved { n.min(cap) } else { 0 };
-      if take > 0
-        && let Ok(chunk) = cons.read_chunk(take)
-      {
-        let (a, b) = chunk.as_slices();
-        for part in [a, b] {
-          let r = to_hops.push(part, |hop| {
-            meter.on_hop(hop);
-            fanout.push_hop(hop);
-            hops += 1;
-          });
-          if let Err(e) = r {
-            resample_error = Some(e);
-          }
+    // ---- 延迟封顶：设备环超硬顶就丢最旧 ----
+    // 超硬顶的是**已经过时的音频**（流刚打开时设备预填的一大块、会话重建期间的积压、
+    // 调度停顿），正确动作是丢掉、跳到现在；按 2× 放出去等于把一次突发变成
+    // 「之后十几秒都在听旧声音」（v18 实测：单列麦克风监听长期停在 289 ms）。
+    let n = cons.slots();
+    let excess = clamp_excess(n, slot_frames);
+    if excess > 0
+      && let Ok(c) = cons.read_chunk(excess)
+    {
+      c.commit_all();
+      clamped += excess as u64;
+    }
+    let n = n - excess;
+    let ring_level_ms = n as f32 * 1000.0 / native_rate as f32;
+    // ---- 放行节拍：只看本路自己的时钟 ----
+    // 源可能「一大块到达」：Linux `parec` 一次一整块（现为 30 ms，见
+    // `loopback::PARE_LATENCY_MS`），部分 ALSA / WASAPI 设备一次十几毫秒。
+    // 整块顺着往下推会把下游 10 ms 级的有界环一次灌满、块与块的接缝上又立刻饿死
+    // （行输入环超 `ROW_CAP` 丢最旧，实测丢掉 ~80%，听感是规律的咔咔声）。
+    // 所以按**本路的实时速率**放行：整块留在设备环里当垫层、被摊成平滑 hop 流。
+    // 那块垫层带来的延迟由**源的块大小**决定，压不掉 —— 要更低就压源侧的缓冲。
+    //
+    // **不要退回「拿下游水位当放行开关」**（v18）：放行速率恰好等于源速率时水位是
+    // 随机游走，一旦被垫高就再也降不回来（设备预填的那一块会永久留在环里）。
+    let dt = now.duration_since(last_budget).as_secs_f64();
+    last_budget = now;
+    let take = release_realtime(n, &mut budget, dt, native_rate as f64, slot_frames);
+    if take > 0
+      && let Ok(chunk) = cons.read_chunk(take)
+    {
+      let (a, b) = chunk.as_slices();
+      for part in [a, b] {
+        let r = to_hops.push(part, |hop| {
+          meter.on_hop(hop);
+          fanout.push_hop(hop);
+          hops += 1;
+        });
+        if let Err(e) = r {
+          resample_error = Some(e);
         }
-        chunk.commit_all();
       }
+      chunk.commit_all();
     }
 
     if now.duration_since(last_publish) >= PUBLISH_PERIOD {
@@ -435,6 +482,9 @@ pub(super) fn worker<K>(
       let frames_in = stats.frames.load(Relaxed);
       let frames_out = hops * HOP as u64;
       let xruns = stats.xruns.load(Relaxed);
+      // 输入流的「丢弃」= ALSA 欠载（xrun）+ 本工作线程的延迟封顶丢最旧。
+      // 两者都是「样本没走到下游」，合在一个字段里报（+ 速率），面板一眼看出还在不在丢。
+      let dropped = xruns + clamped;
       let errors = stats.errors.load(Relaxed);
       let (inf_avg, inf_max) = (
         Probe::unavailable("处理链在列里（见引擎概要）"),
@@ -468,12 +518,12 @@ pub(super) fn worker<K>(
         peak_dbfs: m.peak_dbfs,
         rms_dbfs: m.rms_dbfs,
         underruns: Probe::unavailable("输入流无欠载概念"),
-        overruns: xruns,
+        overruns: dropped,
         resyncs: Probe::unavailable("输入流无重同步"),
         stream_errors: errors,
         underrun_per_s: Probe::unavailable("输入流无欠载概念"),
         resync_per_s: Probe::unavailable("输入流无重同步"),
-        overrun_per_s: drop_rate.push(now, xruns),
+        overrun_per_s: drop_rate.push(now, dropped),
         stream_error_per_s: err_rate.push(now, errors),
         last_error,
         buffer_level_ms: ring_level_ms,
@@ -493,4 +543,101 @@ pub(super) fn worker<K>(
 
   fanout.close();
   hub.remove_stream(&stream_id);
+}
+
+/// 放行节拍的模拟：`arrivals` 是每个 tick 到达的原生样本数。
+/// 返回（放行后的环水位峰值、单拍最大放行量、累计丢弃、结束时环里的样本数）。
+///
+/// 顺序与 [`worker`] 里一致：**先延迟封顶丢最旧，再按实时预算放行**。
+#[cfg(test)]
+fn simulate(arrivals: &[usize], slot_frames: usize, tick_s: f64) -> (usize, usize, usize, usize) {
+  let mut budget = 0.0f64;
+  let mut ring = 0usize;
+  let mut peak = 0usize;
+  let mut max_take = 0usize;
+  let mut dropped = 0usize;
+  for &a in arrivals {
+    ring += a;
+    let excess = clamp_excess(ring, slot_frames);
+    ring -= excess;
+    dropped += excess;
+    let take = release_realtime(
+      ring,
+      &mut budget,
+      tick_s,
+      slot_frames as f64 * 100.0,
+      slot_frames,
+    );
+    ring -= take;
+    peak = peak.max(ring);
+    max_take = max_take.max(take);
+  }
+  (peak, max_take, dropped, ring)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  /// 实时源（每 tick 正好 10 ms 的数据）**一点都不许累积**。
+  ///
+  /// 这条是 v18 那个 bug 的回归测试：v18 拿「下游水位」当放行开关，而放行速率恰好
+  /// 等于源速率，于是设备环里的水位**只进不出**（实测单列麦克风监听长期 289 ms）。
+  #[test]
+  fn realtime_source_never_accumulates() {
+    let slot = 480;
+    let (peak, max_take, dropped, left) = simulate(&vec![slot; 1000], slot, 0.010);
+    assert_eq!(peak, 0, "实时源不该在设备环里留下水位");
+    assert_eq!(left, 0, "结束时环里应该空的");
+    assert_eq!(max_take, slot, "单拍放行恒为一格（= 10 ms）");
+    assert_eq!(dropped, 0, "实时源不该丢样本");
+  }
+
+  /// 设备比标称快（每 tick 多 1 个样本）：水位被**硬顶钉住**，不会一路涨上去。
+  /// 守恒：多出来的样本只有两条出路 —— 丢掉，或者还在环里（有硬顶）。
+  #[test]
+  fn faster_device_is_clamped_not_accumulated() {
+    let slot = 480;
+    let ticks = 10_000;
+    let (peak, max_take, dropped, left) = simulate(&vec![slot + 1; ticks], slot, 0.010);
+    assert!(
+      peak <= DEV_MAX_MS / 10 * slot,
+      "水位必须钉在硬顶以内，实测峰值 {peak}（硬顶 {}）",
+      DEV_MAX_MS / 10 * slot
+    );
+    assert_eq!(max_take, slot, "单拍仍只放一格（不许退化成突发放行）");
+    assert_eq!(dropped + left, ticks, "多出来的样本要么丢掉、要么在环里");
+  }
+
+  /// 突发源（一整块到达）：**摊成平滑 hop 流**、不冲爆下游，也不丢。
+  /// `parec` 是 30 ms 一块 = 1440 样本；块比硬顶小的时候一个都不许丢。
+  #[test]
+  fn burst_source_is_paced_not_flooded() {
+    let slot = 480;
+    let mut arrivals = Vec::new();
+    for i in 0..300 {
+      arrivals.push(if i % 3 == 0 { 3 * slot } else { 0 }); // 每 3 拍来一个 30 ms 的块
+    }
+    let (peak, max_take, dropped, left) = simulate(&arrivals, slot, 0.010);
+    assert_eq!(dropped, 0, "块（30 ms）小于硬顶（60 ms）时不许丢");
+    assert_eq!(left, 0, "推取同速，结束时应放完");
+    assert_eq!(max_take, slot, "整块必须被摊平：单拍只放一格");
+    assert!(
+      peak <= 3 * slot,
+      "设备环里最多留一个块（30 ms），实测 {peak}"
+    );
+  }
+
+  /// 长停顿 / 会话重建期间的积压：**丢掉**（跳到现在），不许慢慢放出去。
+  /// 「慢慢放」= 之后十几秒都在听旧声音 —— v18 正是这么把 300 ms 变成稳态的。
+  #[test]
+  fn backlog_is_dropped_not_played_out() {
+    let slot = 480;
+    let mut arrivals = vec![20 * slot]; // 一次到达 200 ms
+    arrivals.extend(vec![slot; 500]);
+    let (_, max_take, dropped, left) = simulate(&arrivals, slot, 0.010);
+    assert_eq!(dropped, 20 * slot - slot, "超硬顶的部分全丢，只留目标一格");
+    assert_eq!(left, 0, "丢完就跳到现在，不留在环里当待播数据");
+    assert_eq!(max_take, slot, "收尾仍是实时放行");
+  }
 }

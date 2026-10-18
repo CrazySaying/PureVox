@@ -74,21 +74,6 @@ impl Fanout {
       .retain(|(sid, _)| sid != id);
   }
 
-  /// 下游**最慢**订阅者的环水位（样本，即「还能读多少」）。
-  ///
-  /// 采集侧据此把「行输入环」垫到目标水位（DESIGN.md §3.3：目标 2 hop）——
-  /// 源若是「一大块到达」（Linux `parec` 一次 100 ms），没有这个垫层的话
-  /// 下游列工作线程会在块与块的接缝上饿一格，听感是规律的咔咔声。
-  /// 没有订阅者 → 0（数据无人消费）。
-  pub fn min_level(&self) -> usize {
-    let subs = self.subscribers.lock().unwrap();
-    subs
-      .iter()
-      .map(|(_, p)| SUBSCRIBER_CAPACITY - p.slots())
-      .min()
-      .unwrap_or(0)
-  }
-
   /// 分发一个 hop；订阅者缓冲满（其工作线程停摆）时丢弃该订阅者这一 hop 的多余部分。
   pub fn push_hop(&self, hop: &[f32]) {
     let mut subs = self.subscribers.lock().unwrap();
