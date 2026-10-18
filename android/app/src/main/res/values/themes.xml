@@ -21,7 +21,36 @@
     <!-- 日夜跟随系统（DayNight），亮/暗自动切换。 -->
     <style name="Theme.PureVox" parent="Theme.Material3.DayNight.NoActionBar">
         <item name="colorPrimary">@color/pv_blue</item>
-        <item name="colorOnPrimary">#FFFFFF</item>
+        <item name="colorOnPrimary">@color/pv_on_blue</item>
+    </style>
+
+    <!--
+      按钮：**同一套尺寸，只差容器**（filled = 卡片里的主操作，outlined = 次操作）。
+      以前次操作用 `Widget.Material3.Button.TextButton`（只有文字、没有底），主操作在暗色
+      主题下又是深蓝叠深色卡片 —— 两种都表现为「按钮没有背景」。现在两种都有可见容器，
+      尺寸/字号/字距也统一（`android:inset*` 归零，免得同一行两个按钮高度对不齐）。
+    -->
+    <style name="PvButton" parent="Widget.Material3.Button">
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:minHeight">44dp</item>
+        <item name="android:insetTop">0dp</item>
+        <item name="android:insetBottom">0dp</item>
+        <item name="android:minWidth">0dp</item>
+        <item name="android:textSize">13sp</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:letterSpacing">0.02</item>
+    </style>
+
+    <!-- 次操作：可见边框（父样式不同，尺寸那几项与 PvButton 逐条一致） -->
+    <style name="PvButton.Outlined" parent="Widget.Material3.Button.OutlinedButton">
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:minHeight">44dp</item>
+        <item name="android:insetTop">0dp</item>
+        <item name="android:insetBottom">0dp</item>
+        <item name="android:minWidth">0dp</item>
+        <item name="android:textSize">13sp</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:letterSpacing">0.02</item>
     </style>
 
     <style name="PvSectionTitle">

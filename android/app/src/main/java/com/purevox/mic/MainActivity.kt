@@ -22,6 +22,8 @@ package com.purevox.mic
 import android.Manifest
 import android.annotation.SuppressLint
 import android.content.BroadcastReceiver
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -42,13 +44,16 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.SwitchCompat
 import androidx.core.content.ContextCompat
+import com.google.android.material.progressindicator.LinearProgressIndicator
 import com.purevox.mic.audio.MicUplink
 import com.purevox.mic.audio.OpusSupport
 import com.purevox.mic.audio.SpeakerDownlink
+import com.purevox.mic.diag.RtStats
 import com.purevox.mic.net.Discovery
 import com.purevox.mic.net.HealthProbe
 import com.purevox.mic.net.WsClient
@@ -72,8 +77,10 @@ import java.io.File
  *
  * 纪律：
  * - **收到 `ready` 之前不推流、不播放**（[applyState] 里 `ready` 是必要条件）。
- * - 状态区是固定行数的读数（连接状态 / RTT / 收发包数 / 播放水位 / Opus 探测），
- *   2 Hz 刷新；失败项显示「不可用 + 原因」，绝不显示伪造的 0。
+ * - 状态区（在诊断区里，默认收起）分两块：**网络**（RTT 窗口 / 抖动 / 真实速率 / 结论）
+ *   与**音频**（上/下行电平条、缓冲水位条、欠载 / 丢包 / 解码掩盖），再加几行累计读数；
+ *   2 Hz 刷新。失败项显示「不可用 + 原因」，实时量没有样本时写「采样中…」——
+ *   **绝不显示伪造的 0**。整块诊断可一键复制到剪贴板（[copyDiag]）。
  * - 所有 OkHttp 回调都切回主线程再动 UI。
  *
  * 会话保活：只要「已连接」或「正在推流」就由 [CaptureService] 常驻一条前台通知
@@ -88,6 +95,9 @@ class MainActivity : AppCompatActivity() {
         private const val DEFAULT_HOST = "192.168.1.100"
         private const val MAX_LOG_LINES = 80
         private const val STATUS_INTERVAL_MS = 500L
+
+        /** 下行缓冲水位条的满量程：200 ms（稳态水位约 40 ms，上下浮动都正常）。 */
+        private const val BUFFER_FULL_MS = 200
 
         /**
          * 不转发给电脑的系统键：这些键在本机有系统级语义，转走会让手机用不了（返回/主屏/音量…）。
@@ -130,8 +140,13 @@ class MainActivity : AppCompatActivity() {
     private var connecting = false
     private var lastErr = ""
     private var opusDetail = ""
-    private var rttMs = Double.NaN
     private var healthText = "未自检"
+
+    /**
+     * 诊断读数的时间序列（RTT 窗口 / 速率 / 结论）。**连接重建时换一个新的**，
+     * 这样上一次会话的 RTT 与速率不会渗进新会话的读数里（见 [connect]）。
+     */
+    private var rt = RtStats()
 
     @Volatile
     private var ready = false
@@ -174,6 +189,15 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvStatus: TextView
     private lateinit var tvHealth: TextView
     private lateinit var tvErr: TextView
+    private lateinit var tvNet: TextView
+    private lateinit var tvAudio: TextView
+    private lateinit var pbUpLevel: LinearProgressIndicator
+    private lateinit var pbDownLevel: LinearProgressIndicator
+    private lateinit var pbBuffer: LinearProgressIndicator
+    private lateinit var tvUpLevel: TextView
+    private lateinit var tvDownLevel: TextView
+    private lateinit var tvBuffer: TextView
+    private lateinit var btnCopyDiag: Button
     private lateinit var swMic: SwitchCompat
     private lateinit var swSpeaker: SwitchCompat
     private lateinit var swRemote: SwitchCompat
@@ -314,6 +338,8 @@ class MainActivity : AppCompatActivity() {
 
         // 诊断区默认收起，标题行点击展开/收起
         tvDiagHeader.setOnClickListener { toggleDiag() }
+        // 「复制诊断」：把整块诊断（含日志）塞进剪贴板 —— 出错时不必让人截图
+        btnCopyDiag.setOnClickListener { copyDiag() }
 
         // 后台保活：电池优化白名单
         btnBattery.setOnClickListener { requestIgnoreBattery() }
@@ -542,7 +568,7 @@ class MainActivity : AppCompatActivity() {
         savePrefs()
         connecting = true
         ready = false
-        rttMs = Double.NaN
+        rt = RtStats()
         lastErr = ""
         connState = "连接中…"
         val client = WsClient(h, p, wsListener)
@@ -566,7 +592,7 @@ class MainActivity : AppCompatActivity() {
         ws = null
         connecting = false
         ready = false
-        rttMs = Double.NaN
+        rt = RtStats()
         connState = "已断开"
         applyState()
         updateButtons()
@@ -602,7 +628,8 @@ class MainActivity : AppCompatActivity() {
         }
 
         override fun onPong(id: Long, rtt: Double) {
-            ui.post { rttMs = rtt }
+            // RTT 统计与界面刷新都在主线程做：RtStats 内部不加锁（调用方保证单线程）
+            ui.post { rt.onRtt(rtt) }
         }
 
         override fun onClosed(reason: String) {
@@ -882,62 +909,96 @@ class MainActivity : AppCompatActivity() {
         btnInstall.isEnabled = !updateBusy && updateApk != null
     }
 
-    /** 固定 7 行读数；行数固定，数值变长也不跳布局。 */
+    /** 诊断区刷新：网络统计 + 音频电平/缓冲条 + 固定读数行（行数固定，数值变长也不跳）。 */
     private fun updateStatus() {
         val c = ws
         val enc = uplink
         val dec = downlink
+        // 实时量全交给 RtStats（单一来源）：界面只渲染，不自己另算一套
+        val net = rt.sample(
+            nowMs = System.currentTimeMillis(),
+            upPackets = c?.txPackets?.get() ?: 0L,
+            upBytes = c?.txBytes?.get() ?: 0L,
+            downPackets = c?.rxPackets?.get() ?: 0L,
+            downBytes = c?.rxBytes?.get() ?: 0L,
+            underruns = dec?.underruns ?: 0L,
+            dropped = dec?.dropped ?: 0L,
+            concealed = dec?.concealed ?: 0L,
+        )
+
+        // ---- 网络：RTT 窗口 + 抖动 + 真实速率（字节差分）+ 结论
+        val q = rt.netVerdict(net, c != null)
+        tvNet.text = buildString {
+            if (net.rttSamples == 0) {
+                append(row(getString(R.string.status_rtt), "尚无 pong（1 s 一次）"))
+                append(row(getString(R.string.diag_jitter), "—"))
+            } else {
+                append(
+                    row(
+                        getString(R.string.status_rtt),
+                        "最近 ${ms(net.rttLast)} · 平均 ${ms(net.rttAvg)} · 最大 ${ms(net.rttMax)}（${net.rttSamples} 样本）",
+                    ),
+                )
+                append(row(getString(R.string.diag_jitter), ms(net.jitter)))
+            }
+            append(row(getString(R.string.status_up), rateText(net.upPps, net.upKbps, c?.txPackets?.get())))
+            append(row(getString(R.string.status_down), rateText(net.downPps, net.downKbps, c?.rxPackets?.get())))
+            append(row(getString(R.string.diag_quality), "${q.label} · ${q.detail}"))
+        }
+
+        // ---- 音频：电平/缓冲用条，数值仍等宽写在右侧
+        val upLevel = enc?.level ?: 0f
+        val downPeak = dec?.peak ?: 0f
+        pbUpLevel.progress = rt.levelPercent(upLevel)
+        tvUpLevel.text = if (enc == null) "未开启" else dbfs(upLevel)
+        pbDownLevel.progress = rt.levelPercent(downPeak)
+        tvDownLevel.text = if (dec == null) "未开启" else dbfs(downPeak)
+
+        val bufferedMs = dec?.bufferedMs()?.toInt() ?: 0
+        pbBuffer.progress = (bufferedMs * 100 / BUFFER_FULL_MS).coerceIn(0, 100)
+        tvBuffer.text = if (dec == null) "未开启" else "$bufferedMs ms"
+
+        val a = rt.audioVerdict(net, dec != null)
+        tvAudio.text = buildString {
+            append(
+                row(
+                    getString(R.string.diag_chain),
+                    if (enc == null && dec == null) {
+                        "上行/下行都未开启"
+                    } else {
+                        (enc?.let { "编码 ${it.encoderName} · 采集 ${OpusSupport.pcmName(it.recordEncoding)}" }
+                            ?: "未上行") + " → " + (dec?.let { "解码 ${it.decoderName}" } ?: "未订阅")
+                    },
+                ),
+            )
+            if (enc != null) {
+                append(
+                    row(
+                        getString(R.string.status_up),
+                        "编出 ${enc.encoderPackets} 包 · 丢 ${enc.encoderDroppedSamples} 样本",
+                    ),
+                )
+            }
+            append(
+                row(
+                    getString(R.string.status_play),
+                    if (dec == null) {
+                        "未开启"
+                    } else {
+                        "欠载 ${dec.underruns}（${fmt1(net.underrunPps)}/s）" +
+                            " · 丢包 ${dec.dropped}（${fmt1(net.droppedPps)}/s）" +
+                            " · 掩盖 ${dec.concealed}（${fmt1(net.concealedPps)}/s）" +
+                            (dec.lastError?.let { " · $it" } ?: "")
+                    },
+                ),
+            )
+            append(row(getString(R.string.diag_audio), "${a.label} · ${a.detail}"))
+        }
+
+        // ---- 读数行（身份与累计信息；累计包数已在上面的速率行里，不重复）
         val line = StringBuilder()
         line.append(row(getString(R.string.status_conn), connState))
         line.append(row(getString(R.string.status_host), Proto.wsUrl(host, port)))
-        line.append(
-            row(
-                getString(R.string.status_rtt),
-                if (rttMs.isNaN()) "测量中…" else String.format("%.1f ms", rttMs),
-            ),
-        )
-        line.append(
-            row(
-                getString(R.string.status_up),
-                if (c == null) {
-                    "未连接"
-                } else {
-                    "${c.txPackets.get()} 包" + if (enc != null) {
-                        " · 编码 ${enc.encoderName} · 采集 ${OpusSupport.pcmName(enc.recordEncoding)}" +
-                            " · 电平 ${String.format("%.2f", enc.level)}" +
-                            " · 编出 ${enc.encoderPackets} 包" +
-                            if (enc.encoderDroppedSamples > 0) " · 丢 ${enc.encoderDroppedSamples} 样本" else ""
-                    } else {
-                        " · 未开启"
-                    }
-                },
-            ),
-        )
-        line.append(
-            row(
-                getString(R.string.status_down),
-                if (c == null) {
-                    "未连接"
-                } else {
-                    "${c.rxPackets.get()} 包" + if (dec != null) {
-                        " · 解码 ${dec.decoderName} · 水位 ${dec.bufferedMs().toInt()} ms"
-                    } else {
-                        " · 未订阅"
-                    }
-                },
-            ),
-        )
-        line.append(
-            row(
-                getString(R.string.status_play),
-                if (dec == null) {
-                    "未开启"
-                } else {
-                    "欠载 ${dec.underruns} · 丢包 ${dec.dropped} · 峰值 ${String.format("%.2f", dec.peak)}" +
-                        (dec.lastError?.let { " · $it" } ?: "")
-                },
-            ),
-        )
         line.append(row(getString(R.string.status_opus), opusDetail))
         tvStatus.text = line.toString()
 
@@ -946,8 +1007,29 @@ class MainActivity : AppCompatActivity() {
         tvErr.visibility = if (lastErr.isEmpty()) android.view.View.GONE else android.view.View.VISIBLE
     }
 
-    private fun row(label: String, value: String): String =
-        String.format("%-11s %s%n", label, value)
+    /**
+     * 上/下行速率。没连上就说「未连接」、还没到第一次采样就说「采样中」——
+     * **不拿 0 冒充**（0 包/s 与「根本没连上」是两件事）。
+     */
+    private fun rateText(pps: Double, kbps: Double, total: Long?): String = when {
+        total == null -> "未连接"
+        pps.isNaN() -> "采样中…"
+        else -> "${fmt1(pps)} 包/s · ${fmt1(kbps)} kbps · 累计 $total 包"
+    }
+
+    /** 电平（线性峰值 0..1）→ dBFS 读数；太小直接报「静音」，免得出现 -inf。 */
+    private fun dbfs(level: Float): String {
+        if (level <= 1e-5f) return "静音"
+        return String.format("%.1f dBFS", 20.0 * kotlin.math.log10(level.toDouble()))
+    }
+
+    private fun ms(v: Double): String = if (v.isNaN()) "—" else String.format("%.1f ms", v)
+
+    private fun fmt1(v: Double): String = if (v.isNaN()) "—" else String.format("%.1f", v)
+
+    /** 等宽读数的列宽固定，数值变长也不跳布局（对齐靠字符数，不靠固定高度）。 */
+    private fun row(label: String, value: String, width: Int = 8): String =
+        String.format("%-${width}s %s%n", label, value)
 
     private fun showErr(msg: String) {
         lastErr = msg
@@ -976,6 +1058,30 @@ class MainActivity : AppCompatActivity() {
         val show = llDiag.visibility != View.VISIBLE
         llDiag.visibility = if (show) View.VISIBLE else View.GONE
         tvDiagHeader.setText(if (show) R.string.diag_hide else R.string.diag_show)
+    }
+
+    /**
+     * 把整块诊断复制到剪贴板（网络 + 音频 + 读数 + 日志）。
+     *
+     * 存在的意义：手机上报问题最省事的方式就是复制一段文本，不必让人对着屏幕截图，
+     * 也免得「日志只留在设备上、退一下就没了」。
+     */
+    private fun copyDiag() {
+        val text = buildString {
+            append(getString(R.string.diag_net)).append('\n')
+            append(tvNet.text)
+            append('\n').append(getString(R.string.diag_audio)).append('\n')
+            append(tvAudio.text)
+            append('\n')
+            append(tvStatus.text)
+            append(tvHealth.text).append('\n')
+            if (lastErr.isNotEmpty()) append(lastErr).append('\n')
+            append('\n').append(tvLog.text).append('\n')
+        }
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        cm.setPrimaryClip(ClipData.newPlainText("PureVox 诊断", text))
+        Toast.makeText(this, R.string.diag_copied, Toast.LENGTH_SHORT).show()
+        log("诊断已复制到剪贴板（${text.length} 字）")
     }
 
     private fun isIgnoringBattery(): Boolean {
@@ -1125,6 +1231,15 @@ class MainActivity : AppCompatActivity() {
         tvStatus = findViewById(R.id.tvStatus)
         tvHealth = findViewById(R.id.tvHealth)
         tvErr = findViewById(R.id.tvErr)
+        tvNet = findViewById(R.id.tvNet)
+        tvAudio = findViewById(R.id.tvAudio)
+        pbUpLevel = findViewById(R.id.pbUpLevel)
+        pbDownLevel = findViewById(R.id.pbDownLevel)
+        pbBuffer = findViewById(R.id.pbBuffer)
+        tvUpLevel = findViewById(R.id.tvUpLevel)
+        tvDownLevel = findViewById(R.id.tvDownLevel)
+        tvBuffer = findViewById(R.id.tvBuffer)
+        btnCopyDiag = findViewById(R.id.btnCopyDiag)
         swMic = findViewById(R.id.swMic)
         swSpeaker = findViewById(R.id.swSpeaker)
         swRemote = findViewById(R.id.swRemote)

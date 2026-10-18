@@ -15,8 +15,9 @@
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// PureVox Android 客户端：Gradle 设置。仓库只有 :app 一个模块（无 JNI / CMake / NDK，
-// Opus 编解码全部走系统 MediaCodec）。
+// PureVox Android 客户端：Gradle 设置。仓库只有 :app 一个模块（**构建不需要 NDK / CMake**：
+// Opus 走内置 libopus 的预编译产物 `jniLibs/arm64-v8a/libpvopus.so` + `cpp/pv_opus.cpp` 的
+// JNI 转发层，重建才需要 NDK，见 tools/automation/build_opus_android.py）。
 pluginManagement {
     repositories {
         google()

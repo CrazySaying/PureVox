@@ -58,10 +58,12 @@ class OpusDecoder {
         private set
 
     /** 丢弃的包数（理论极少；统计出来是因为「看不见的状态等于不存在的状态」）。 */
+    @Volatile
     var dropped: Long = 0L
         private set
 
-    /** 走 PLC 补偿的次数：正常应为 0，持续非 0 说明网络在抖。 */
+    /** 走 PLC 补偿的次数：正常应为 0，持续非 0 说明网络在抖。界面线程会读，故 volatile。 */
+    @Volatile
     var concealed: Long = 0L
         private set
 

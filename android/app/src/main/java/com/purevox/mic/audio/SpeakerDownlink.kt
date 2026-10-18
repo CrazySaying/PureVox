@@ -103,6 +103,14 @@ class SpeakerDownlink {
     var peak: Float = 0f
         private set
 
+    /**
+     * 解码器走 PLC（丢包补帧）的次数。
+     *
+     * 与 [underruns] 是**两件事**，别混：欠载 = 我们自己的缓冲空了、写了静音
+     * （设备侧没喂上）；掩盖 = 数据流里缺包、解码器补出来的（网络在抖）。
+     */
+    val concealed: Long get() = decoder?.concealed ?: 0L
+
     /** 最近一次故障原因（null = 正常）；界面上要显示，不能静默。 */
     @Volatile
     var lastError: String? = null

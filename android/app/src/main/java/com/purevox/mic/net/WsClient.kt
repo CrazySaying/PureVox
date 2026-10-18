@@ -98,6 +98,13 @@ class WsClient(
     /** 下行（电脑 → 手机）收到的 Opus 包数。 */
     val rxPackets = AtomicLong(0)
 
+    /**
+     * 上/下行**字节数**（含控制帧）。诊断用：界面拿它按秒差分算真实码率 ——
+     * 不能拿「Opus 比特率设的是多少」冒充实际码率（控帧、丢包、暂停推流都会让它不一样）。
+     */
+    val txBytes = AtomicLong(0)
+    val rxBytes = AtomicLong(0)
+
     // ---------------------------------------------------------------- 连接
 
     fun connect() {
@@ -148,7 +155,9 @@ class WsClient(
     fun sendText(json: String): Boolean {
         val s = ws ?: return false
         return try {
-            s.send(json)
+            if (!s.send(json)) return false
+            txBytes.addAndGet(json.toByteArray(Charsets.UTF_8).size.toLong())
+            true
         } catch (e: Throwable) {
             Log.w(TAG, "sendText 异常", e)
             false
@@ -162,6 +171,7 @@ class WsClient(
             val payload = if (len == data.size) data else data.copyOf(len)
             if (!s.send(payload.toByteString())) return false
             txPackets.incrementAndGet()
+            txBytes.addAndGet(payload.size.toLong())
             true
         } catch (e: Throwable) {
             Log.w(TAG, "sendAudio 异常", e)
@@ -221,6 +231,7 @@ class WsClient(
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
+            rxBytes.addAndGet(text.toByteArray(Charsets.UTF_8).size.toLong())
             when (val msg = ServerMsg.parse(text)) {
                 is ServerMsg.Pong -> onPong(msg.id)
                 else -> listener.onMessage(msg)
@@ -232,6 +243,7 @@ class WsClient(
             val packet = bytes.toByteArray()
             if (packet.isEmpty()) return
             rxPackets.incrementAndGet()
+            rxBytes.addAndGet(packet.size.toLong())
             listener.onAudioPacket(packet)
         }
 

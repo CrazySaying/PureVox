@@ -47,12 +47,24 @@
     <string name="diag_show">诊断　▸ 点此展开</string>
     <string name="diag_hide">诊断　▾ 点此收起</string>
 
-    <!-- 状态读数（固定行数，与 MainActivity.updateStatus 一一对应） -->
+    <!-- 实时监控两块（与 MainActivity.updateStatus 一一对应） -->
+    <string name="diag_net">网络</string>
+    <string name="diag_audio">音频</string>
+    <string name="diag_jitter">抖动</string>
+    <string name="diag_quality">质量</string>
+    <string name="diag_level_up">上行电平</string>
+    <string name="diag_level_down">下行电平</string>
+    <string name="diag_buffer">下行缓冲</string>
+    <string name="diag_chain">链路</string>
+    <string name="btn_copy_diag">复制诊断</string>
+    <string name="diag_copied">诊断已复制到剪贴板</string>
+
+    <!-- 状态读数（行数固定，与 MainActivity.updateStatus 一一对应） -->
     <string name="status_conn">连接状态</string>
     <string name="status_host">电脑地址</string>
     <string name="status_rtt">RTT</string>
-    <string name="status_up">上行包</string>
-    <string name="status_down">下行包</string>
+    <string name="status_up">上行</string>
+    <string name="status_down">下行</string>
     <string name="status_play">播放</string>
     <string name="status_opus">Opus 探测</string>
     <string name="status_health">自检　</string>

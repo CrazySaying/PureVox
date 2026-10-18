@@ -86,20 +86,22 @@
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
                         android:autofillHints=""
+                        android:background="@drawable/bg_field"
                         android:hint="@string/hint_host"
                         android:importantForAutofill="no"
                         android:inputType="textUri"
                         android:maxLines="1"
+                        android:minHeight="48dp"
+                        android:padding="12dp"
                         android:textSize="14sp" />
 
                     <Button
                         android:id="@+id/btnConnect"
+                        style="@style/PvButton"
                         android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
                         android:layout_marginStart="8dp"
                         android:minWidth="88dp"
-                        android:text="@string/btn_connect"
-                        android:textAllCaps="false" />
+                        android:text="@string/btn_connect" />
                 </LinearLayout>
 
                 <!--
@@ -116,35 +118,26 @@
 
                     <Button
                         android:id="@+id/btnRediscover"
-                        style="@style/Widget.Material3.Button.TextButton"
+                        style="@style/PvButton.Outlined"
                         android:layout_width="0dp"
-                        android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:minWidth="0dp"
-                        android:text="@string/btn_rediscover"
-                        android:textAllCaps="false"
-                        android:textSize="12sp" />
+                        android:text="@string/btn_rediscover" />
 
                     <Button
                         android:id="@+id/btnReconnect"
-                        style="@style/Widget.Material3.Button.TextButton"
+                        style="@style/PvButton.Outlined"
                         android:layout_width="0dp"
-                        android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp"
                         android:layout_weight="1"
-                        android:minWidth="0dp"
-                        android:text="@string/btn_reconnect"
-                        android:textAllCaps="false"
-                        android:textSize="12sp" />
+                        android:text="@string/btn_reconnect" />
                 </LinearLayout>
 
                 <Button
                     android:id="@+id/btnHealth"
-                    style="@style/Widget.Material3.Button.TextButton"
+                    style="@style/PvButton.Outlined"
                     android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="@string/btn_health"
-                    android:textAllCaps="false"
-                    android:textSize="12sp" />
+                    android:layout_marginTop="8dp"
+                    android:text="@string/btn_health" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
@@ -232,11 +225,13 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:autofillHints=""
+                    android:background="@drawable/bg_field"
                     android:hint="@string/hint_text_local"
                     android:importantForAutofill="no"
                     android:inputType="textMultiLine|textCapSentences"
                     android:maxLines="6"
                     android:minHeight="56dp"
+                    android:padding="12dp"
                     android:textSize="14sp" />
 
                 <LinearLayout
@@ -247,24 +242,18 @@
 
                     <Button
                         android:id="@+id/btnSend"
+                        style="@style/PvButton"
                         android:layout_width="0dp"
-                        android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:minWidth="0dp"
-                        android:text="@string/btn_send"
-                        android:textAllCaps="false"
-                        android:textSize="13sp" />
+                        android:text="@string/btn_send" />
 
                     <Button
                         android:id="@+id/btnClear"
-                        style="@style/Widget.Material3.Button.TextButton"
+                        style="@style/PvButton.Outlined"
                         android:layout_width="0dp"
-                        android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp"
                         android:layout_weight="1"
-                        android:minWidth="0dp"
-                        android:text="@string/btn_clear"
-                        android:textAllCaps="false"
-                        android:textSize="13sp" />
+                        android:text="@string/btn_clear" />
                 </LinearLayout>
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
@@ -303,12 +292,10 @@
 
                 <Button
                     android:id="@+id/btnBattery"
-                    style="@style/Widget.Material3.Button.TextButton"
+                    style="@style/PvButton.Outlined"
                     android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="@string/btn_battery_settings"
-                    android:textAllCaps="false"
-                    android:textSize="12sp" />
+                    android:layout_marginTop="8dp"
+                    android:text="@string/btn_battery_settings" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
@@ -337,58 +324,54 @@
 
                 <Button
                     android:id="@+id/btnCheckUpdate"
-                    style="@style/Widget.Material3.Button.TextButton"
+                    style="@style/PvButton.Outlined"
                     android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="@string/btn_check_update"
-                    android:textAllCaps="false"
-                    android:textSize="12sp" />
+                    android:layout_marginTop="8dp"
+                    android:text="@string/btn_check_update" />
 
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
                     android:orientation="horizontal">
 
                     <Button
                         android:id="@+id/btnDownload"
+                        style="@style/PvButton"
                         android:layout_width="0dp"
-                        android:layout_height="wrap_content"
                         android:layout_weight="1"
                         android:enabled="false"
-                        android:minWidth="0dp"
-                        android:text="@string/btn_download"
-                        android:textAllCaps="false"
-                        android:textSize="12sp" />
+                        android:text="@string/btn_download" />
 
                     <Button
                         android:id="@+id/btnInstall"
+                        style="@style/PvButton"
                         android:layout_width="0dp"
-                        android:layout_height="wrap_content"
                         android:layout_marginStart="8dp"
                         android:layout_weight="1"
                         android:enabled="false"
-                        android:minWidth="0dp"
-                        android:text="@string/btn_install"
-                        android:textAllCaps="false"
-                        android:textSize="12sp" />
+                        android:text="@string/btn_install" />
                 </LinearLayout>
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
         <!-- ================= 诊断（默认收起，标题行点击展开） ================= -->
+        <!-- 标题行给一块可见底板（bg_panel + 前景 ripple），否则它只是一行彩色小字，
+             看不出能点（「调试看问题不够」的一半原因是它根本不像入口）。 -->
         <TextView
             android:id="@+id/tvDiagHeader"
             style="@style/PvCardTitle"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="16dp"
-            android:background="?attr/selectableItemBackground"
+            android:background="@drawable/bg_panel"
             android:clickable="true"
             android:focusable="true"
-            android:paddingStart="4dp"
-            android:paddingTop="6dp"
-            android:paddingEnd="4dp"
-            android:paddingBottom="6dp"
+            android:foreground="?attr/selectableItemBackground"
+            android:paddingStart="12dp"
+            android:paddingTop="10dp"
+            android:paddingEnd="12dp"
+            android:paddingBottom="10dp"
             android:text="@string/diag_show" />
 
         <LinearLayout
@@ -398,10 +381,146 @@
             android:orientation="vertical"
             android:visibility="gone">
 
+            <!-- 实时监控 · 网络：RTT 窗口统计 + 抖动 + 真实速率（字节差分，不拿设定比特率冒充） -->
+            <TextView
+                style="@style/PvCardTitle"
+                android:layout_marginTop="10dp"
+                android:text="@string/diag_net" />
+
+            <TextView
+                android:id="@+id/tvNet"
+                style="@style/PvStatus" />
+
+            <!--
+              实时监控 · 音频：电平与缓冲水位用条（数值仍等宽写在右侧，不跳布局）。
+
+              `trackStopIndicatorSize="0dp"` 是**必须**的：Material 3 默认会在轨道末端画一个
+              「停止指示点」，电平为 0（未开启 / 静音）时看着就像条上浮了个点、像是渲染坏了
+              —— 2026-10-18 在模拟器截图里实测到。三条都要关。
+            -->
+            <TextView
+                style="@style/PvCardTitle"
+                android:layout_marginTop="12dp"
+                android:text="@string/diag_audio" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="72dp"
+                    android:layout_height="wrap_content"
+                    android:text="@string/diag_level_up"
+                    android:textSize="11sp" />
+
+                <com.google.android.material.progressindicator.LinearProgressIndicator
+                    android:id="@+id/pbUpLevel"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:max="100"
+                    app:indicatorColor="@color/pv_accent"
+                    app:trackColor="?attr/colorSurfaceVariant"
+                    app:trackCornerRadius="2dp"
+                    app:trackStopIndicatorSize="0dp"
+                    app:trackThickness="6dp" />
+
+                <TextView
+                    android:id="@+id/tvUpLevel"
+                    android:layout_width="92dp"
+                    android:layout_height="wrap_content"
+                    android:fontFamily="monospace"
+                    android:gravity="end"
+                    android:textSize="11sp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="72dp"
+                    android:layout_height="wrap_content"
+                    android:text="@string/diag_level_down"
+                    android:textSize="11sp" />
+
+                <com.google.android.material.progressindicator.LinearProgressIndicator
+                    android:id="@+id/pbDownLevel"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:max="100"
+                    app:indicatorColor="@color/pv_accent"
+                    app:trackColor="?attr/colorSurfaceVariant"
+                    app:trackCornerRadius="2dp"
+                    app:trackStopIndicatorSize="0dp"
+                    app:trackThickness="6dp" />
+
+                <TextView
+                    android:id="@+id/tvDownLevel"
+                    android:layout_width="92dp"
+                    android:layout_height="wrap_content"
+                    android:fontFamily="monospace"
+                    android:gravity="end"
+                    android:textSize="11sp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="72dp"
+                    android:layout_height="wrap_content"
+                    android:text="@string/diag_buffer"
+                    android:textSize="11sp" />
+
+                <com.google.android.material.progressindicator.LinearProgressIndicator
+                    android:id="@+id/pbBuffer"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:max="100"
+                    app:indicatorColor="@color/pv_accent"
+                    app:trackColor="?attr/colorSurfaceVariant"
+                    app:trackCornerRadius="2dp"
+                    app:trackStopIndicatorSize="0dp"
+                    app:trackThickness="6dp" />
+
+                <TextView
+                    android:id="@+id/tvBuffer"
+                    android:layout_width="92dp"
+                    android:layout_height="wrap_content"
+                    android:fontFamily="monospace"
+                    android:gravity="end"
+                    android:textSize="11sp" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/tvAudio"
+                style="@style/PvStatus"
+                android:layout_marginTop="6dp" />
+
+            <Button
+                android:id="@+id/btnCopyDiag"
+                style="@style/PvButton.Outlined"
+                android:layout_width="wrap_content"
+                android:layout_marginTop="10dp"
+                android:text="@string/btn_copy_diag" />
+
             <TextView
                 android:id="@+id/tvStatus"
                 style="@style/PvStatus"
-                android:layout_marginTop="4dp" />
+                android:layout_marginTop="10dp" />
 
             <TextView
                 android:id="@+id/tvHealth"

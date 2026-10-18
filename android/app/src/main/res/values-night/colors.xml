@@ -18,9 +18,13 @@
   SPDX-License-Identifier: GPL-3.0-or-later
 -->
 <!--
-  暗色主题的颜色覆盖。只有 `pv_accent` 需要变 —— 卡片标题在暗底上用亮蓝才看得清；
-  `pv_blue` 是 button 底色（配白字），两个主题都用深蓝，不覆盖。
+  暗色主题的颜色覆盖：
+  * `pv_accent`（卡片标题）在暗底上用亮蓝才看得清；
+  * `pv_blue` 是**按钮底色**：暗色主题下必须变亮蓝，否则深蓝底叠在深色卡片上
+    「像是没有背景」（2026-10-18 修的就是这个），文字随之改成深色（`pv_on_blue`）。
 -->
 <resources>
     <color name="pv_accent">#9BC2FF</color>
+    <color name="pv_blue">#A8C7FA</color>
+    <color name="pv_on_blue">#0A1F3A</color>
 </resources>
