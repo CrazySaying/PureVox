@@ -289,7 +289,7 @@
     '降噪 202609a': 'Denoise 202609a',
     '降噪 202606': 'Denoise 202606',
     'TSE 202609c（现役）': 'TSE 202609c (current)',
-    'AEC 202609（现役）': 'AEC 202609 (current)',
+    'AEC 202610（现役）': 'AEC 202610 (current)',
     柔和: 'Soft',
     清脆: 'Crisp',
     气泡: 'Pop',

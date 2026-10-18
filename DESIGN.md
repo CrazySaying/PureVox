@@ -404,7 +404,7 @@ pub fn resolve(key: &str, kind: ModelKind) -> Option<&'static ModelDesc>;
 ```
 
 - 现存：`purevox_denoise_202609c_ep0012.onnx`（现役）、`202609b` / `202609a` / `202606`、
-  `purevox_aec_202609_cpx_ep0375.onnx`、`purevox_tse_202609c_ep0201.onnx`（+ `..._ref_encoder.onnx`）。
+  `purevox_aec_202610_ep0372.onnx`（现役）、`purevox_tse_202609c_ep0201.onnx`（+ `..._ref_encoder.onnx`）。
   **缓存维度从模型输入读，不写死**。
 - 选择存配置（`denoise_model` 等），计划构建时校验文件存在，缺失进 `problems`。
 - 会话配置：`with_intra_threads(1)` + `with_inter_threads(1)` + `with_intra_op_spinning(false)`
@@ -431,7 +431,7 @@ pub fn resolve(key: &str, kind: ModelKind) -> Option<&'static ModelDesc>;
 | 音效板声部 | `engine` | 每个音效一段 48k/mono 样本（短音效整段入内存） |
 | 播放器环形缓冲 | `engine` | 3 s（48k f32），解码线程写、音频线程读，超限丢最旧 |
 | 网络 acc | `net/remote_mic` / `net/remote_speaker` | 进出各一环，目标 50 ms，硬顶 80 ms（超限丢最旧）；取不足一个 hop 补静音 |
-| 模型 `cache` | `infer` | 由模型决定（降噪 36506 / AEC 215504 / TSE 513216 f32），**每行一份** |
+| 模型 `cache` | `infer` | 由模型决定（降噪 36506 / AEC 91920 / TSE 513216 f32），**每行一份** |
 
 规则：**音频回调零分配零加锁零日志**；工作线程预分配复用；任何进入数据面的容器都必须有上限与丢弃策略。
 

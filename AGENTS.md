@@ -259,7 +259,9 @@ release 构建同样保留（不允许用编译开关剔除）。
   （**滞后 1 hop**）+ `cache_out [1,D]`；缓存维度从模型输入读，不写死；STFT 在模型图内。
   降噪是**列里的处理行**（`engine/components/denoise.rs`，`Stage`），在**列工作线程**内惰性加载
   （每行一份，只加载一次）；模型文件选择存计划，改型号 = 结构性变更 → 重建会话。
-  现役模型常量 `infer::MODEL_DENOISE`。
+  现役模型常量 `infer::MODEL_DENOISE`（降噪）、`infer::MODEL_AEC`（AEC，202610 单流：
+  far/mic 各 5ch 第 0 层 early fusion + iLN，**无显式延迟线**（对齐靠 GRU 隐状态）、cache 91,920；
+  2026-10-18 换下 202609cpx，旧文件已从 `models/` 移除）。
 - **AEC 行 / TSE 行**：AEC 是**输入行**（`ptype = echo_cancel`，本行 `device` = 近端 mic，
   `params.far_device` = 远端参考：`loopback` = 系统默认输出回环、`loopback:<渲染端点ID>` = 指定输出
   回环（WASAPI loopback，`audio/loopback.rs`，仅 Windows）、其它 = 输入设备；`far_delay_ms` **有符号**
@@ -448,7 +450,14 @@ release 构建同样保留（不允许用编译开关剔除）。
      （**GitHub 缓存 key 不可变**，覆盖 = 先删再存；否则同键 save 被拒、旧缓存永远留着）。
      **`warm-cache.yml` 只恢复 registry 与 cargo-tauri，`target/debug` 故意冷构建**
      （否则「预热」退化成把现有桶原样再存一遍，验不到冷构建能不能过）；
-     **`target/release` 任何 workflow 都不保存**（太大），所以打包时 release 目标总是冷编。
+     **`target/release` 任何 workflow 都不保存**（太大），所以打包时 release 目标总是冷编
+     （`release.yml` 里那条 `TARGET_RELEASE_KEY` 的 restore **永远 miss**，留着只是占位）。
+     **顺序有讲究：预热没存完就 tag = 白冷一轮** —— 新代数/新锁的桶要等 `warm-cache.yml`
+     两个平台都 save 完，`release.yml` 才 restore 得到（实测 2026-10-18：桶 00:22/00:30 存完，
+     tag 起来的 run 00:35 才吃上；在那之前起的 run 全程冷编）。数缓存有没有吃上别读日志
+     （in-progress 的 job 取不到 log），看 `gh cache list` 的 `lastAccessedAt` 最快。
+     **键里的 `<Cargo.lock 哈希>` 是 `hashFiles()`，不是文件 sha256** —— 本地 `sha256sum`
+     算出来对不上是正常的，别据此以为键拼错了。
    - **Linux 系统依赖**（本机与 CI 同）：`libwebkit2gtk-4.1-dev libssl-dev libxdo-dev
      librsvg2-dev libgtk-3-dev libasound2-dev pkg-config file rpm`（wry→WebKitGTK、
      cpal→ALSA、rpmbuild→rpm）；运行期还需系统 `libopus0`（缺时网络音频降级，见 §1.2）。

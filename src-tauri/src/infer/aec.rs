@@ -15,12 +15,12 @@
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! AEC 回声消除流式推理（`purevox_aec_202609_cpx` 契约，STFT 在模型图内）：
+//! AEC 回声消除流式推理（`purevox_aec_202610` 契约，STFT 在模型图内）：
 //!
 //! ```text
 //! 输入  mic_hop  [1,480]   近端（本机麦克风）hop
 //!       far_hop  [1,480]   远端（扬声器回环 / 参考）hop，时间对齐后
-//!       cache_in [1,D]     扁平流式缓存（首帧零起；D 由模型决定，如 215504）
+//!       cache_in [1,D]     扁平流式缓存（首帧零起；D 由模型决定，如 91920）
 //! 输出  enh_hop  [1,480]（滞后 1 hop）+ cache_out [1,D]
 //! ```
 //!
@@ -31,11 +31,12 @@ use ort::value::Tensor;
 
 use crate::audio::HOP;
 
-/// 现役 AEC 模型。
-pub const MODEL_AEC: &str = "purevox_aec_202609_cpx_ep0375.onnx";
+/// 现役 AEC 模型（202610 单流：far/mic 各 5ch 在第 0 层 early fusion，无显式延迟线；
+/// 对齐靠 GRU 隐状态，前端感受野 ≥ 数据最大延迟）。
+pub const MODEL_AEC: &str = "purevox_aec_202610_ep0372.onnx";
 
 pub fn aec_models() -> &'static [(&'static str, &'static str)] {
-  &[(MODEL_AEC, "AEC 202609（现役）")]
+  &[(MODEL_AEC, "AEC 202610（现役）")]
 }
 
 pub struct Aec {

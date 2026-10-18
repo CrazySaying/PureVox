@@ -17,7 +17,7 @@
 
 //! AEC 合成回声自检：mic = far 延迟 D 样本 × 增益，看模型能把回声压多少 dB。
 //! 用法：cargo run --release --example aec_bench [模型路径] [延迟ms] [增益]
-//! 默认：../models/purevox_aec_202609_cpx_ep0375.onnx  5ms  0.5
+//! 默认：../models/purevox_aec_202610_ep0372.onnx  5ms  0.5
 
 use ort::session::Session;
 use ort::value::{Tensor, ValueType};
@@ -29,7 +29,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   let path = args
     .get(1)
     .cloned()
-    .unwrap_or_else(|| "../models/purevox_aec_202609_cpx_ep0375.onnx".to_string());
+    .unwrap_or_else(|| "../models/purevox_aec_202610_ep0372.onnx".to_string());
   let delay_ms: f64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(5.0);
   let gain: f32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0.5);
   let d = (delay_ms * 48.0) as usize;
