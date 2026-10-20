@@ -1,0 +1,272 @@
+# 在线编译（推送即跑）—— 推送到本分支就自动在 GitHub 上编译 + 跑门禁，并留下可下载的产物。
+#
+# 与另外两份工作流的分工（**别混用**）：
+#   - `tests.yml`：只跑门禁、只手动触发（上游纪律：日常提交零成本）。
+#   - `release.yml`：tag `v*` 触发，打正式安装包并发 release。
+#   - **本文件**：`push` 到开发分支就触发，目的是「没有本地 Rust 环境也能验证编译」。
+#     它**不建 release**、**不改 tag**，产物只挂在 workflow run 上给人手工下载。
+#
+# 为什么要有它：上游要求本地装 Rust + MSVC + WebKitGTK 才能跑 `check.py`，
+# 在纯 Windows 开发机 / 没有工具链的机器上验不了。把同一套门禁搬到 GitHub runner
+# 上，「我这台机器编不过」就不再等于「代码有问题」。
+#
+# 纪律与其他两份一致：
+#   - 门禁实现只有一处 `tools/automation/check.py`；本文件只负责按 step 拆开跑；
+#   - 版本 / 缓存键的唯一来源是 `tools/automation/versions.env`；
+#   - 缓存只 restore（写入者是 `warm-cache.yml`），所以这里**命中不了也能过**，
+#     只是慢一点 —— 不要为了「快」在这里加 `actions/cache/save`；
+#   - `legacy-v*/` 快照不参与（AGENTS.md 维护准则 3）。
+name: 在线编译（推送触发）
+
+on:
+  push:
+    # 只在本分支与 main 上跑：避免 fork 出来的分支每次都烧 runner 时间。
+    branches:
+      - main
+      - tauri-port
+    # 文档与快照的改动不值得编一遍。
+    paths-ignore:
+      - "legacy-v**"
+      - "**.md"
+      - ".opencode/**"
+  workflow_dispatch:
+
+# 同一个分支连推时，取消上一轮未完成的编译（半成品产物没有价值）。
+concurrency:
+  group: online-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # 脚本大量打中文；Windows runner 的 Python 默认按控制台代码页（cp1252）输出，
+  # 一句 `print("门禁全部通过")` 就是 UnicodeEncodeError。脚本内部也会 reconfigure，
+  # 这里只是双保险。
+  PYTHONIOENCODING: utf-8
+
+jobs:
+  # ------------------------------------------------------------ Windows 编译
+  windows:
+    name: 在线编译 · Windows
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set app version（tag / 日期）
+        shell: bash
+        run: python tools/automation/version.py >> "$GITHUB_ENV"
+
+      - name: Load versions + cache keys (versions.env 是唯一来源)
+        shell: bash
+        run: |
+          # **必须 source，不能只写 GITHUB_ENV**：写进 GITHUB_ENV 的变量要到后续 step
+          # 才注入进程环境，而缓存键就在这一步里拼 —— 只写不 source 的话键是残的。
+          set -a
+          . tools/automation/versions.env
+          set +a
+          while IFS= read -r line || [ -n "$line" ]; do
+            case "$line" in
+              ''|'#'*) continue ;;
+              *=*) printf '%s\n' "$line" >> "$GITHUB_ENV" ;;
+            esac
+          done < tools/automation/versions.env
+          lock="${{ hashFiles('src-tauri/Cargo.lock') }}"
+          {
+            printf 'CARGO_CACHE_KEY=purevox-%s-windows-cargo-%s-%s\n' "$RUNNER_OS" "$CACHE_GEN" "$lock"
+            printf 'TARGET_DEBUG_KEY=purevox-%s-windows-target-dbg-%s-%s\n' "$RUNNER_OS" "$CACHE_GEN" "$lock"
+          } >> "$GITHUB_ENV"
+          echo "CARGO_CACHE_KEY=$CARGO_CACHE_KEY"
+
+      - name: Install Rust toolchain (rustfmt + clippy)
+        shell: bash
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt --component clippy
+          rustup default "$RUST_TOOLCHAIN"
+          rustc --version
+
+      # restore 一律不写 restore-keys（精确命中是唯一路径，理由见 tests.yml）
+      - name: Restore cargo registry (restore-only)
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ env.CARGO_CACHE_KEY }}
+
+      - name: Restore target/debug (restore-only)
+        uses: actions/cache/restore@v6
+        with:
+          path: src-tauri/target/debug
+          key: ${{ env.TARGET_DEBUG_KEY }}
+
+      - name: "Gate · fmt"
+        shell: bash
+        run: python tools/automation/check.py -Gate fmt
+
+      - name: "Gate · clippy"
+        shell: bash
+        run: python tools/automation/check.py -Gate clippy
+
+      - name: "Gate · build"
+        shell: bash
+        run: python tools/automation/check.py -Gate build
+
+      - name: "Gate · test"
+        shell: bash
+        run: python tools/automation/check.py -Gate test
+
+      - name: "Gate · version"
+        shell: bash
+        run: python tools/automation/check.py -Gate version
+
+      - name: "Gate · bundle"
+        shell: bash
+        run: python tools/automation/check.py -Gate bundle
+
+      # 「能编译」之外再给一个**能直接跑的程序**：debug 二进制 + onnxruntime 的
+      # DirectML.dll，打包成 zip 挂在 run 上。它不是安装包（那是 release.yml 的事），
+      # 只用来「下载下来双击看看界面起不起得来」。
+      - name: Stage runnable build
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="dist/online-build-windows"
+          mkdir -p "$out"
+          cp src-tauri/target/debug/purevox.exe "$out/"
+          # ort 在 Windows 上运行时需要 DirectML.dll（由 ort-sys 构建脚本放在 out/ 里）
+          dll="$(find src-tauri/target/debug/build -path '*ort-sys*/out/DirectML.dll' | head -n1 || true)"
+          if [ -n "$dll" ]; then
+            cp "$dll" "$out/"
+          else
+            echo "::warning::没找到 DirectML.dll，产物可能起不来（onnxruntime 运行时会缺 DLL）"
+          fi
+          # 模型随包：界面选型号时按 models/ 找文件
+          cp -r models "$out/"
+          ls -la "$out"
+
+      - name: Upload runnable build
+        uses: actions/upload-artifact@v7
+        with:
+          name: PureVox-Windows-debug-${{ env.STAMP }}
+          path: dist/online-build-windows/
+          if-no-files-found: error
+
+  # -------------------------------------------------------------- Linux 编译
+  linux:
+    name: 在线编译 · Linux
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set app version（tag / 日期）
+        shell: bash
+        run: python3 tools/automation/version.py >> "$GITHUB_ENV"
+
+      - name: Load versions + cache keys (versions.env 是唯一来源)
+        shell: bash
+        run: |
+          set -a
+          . tools/automation/versions.env
+          set +a
+          while IFS= read -r line || [ -n "$line" ]; do
+            case "$line" in
+              ''|'#'*) continue ;;
+              *=*) printf '%s\n' "$line" >> "$GITHUB_ENV" ;;
+            esac
+          done < tools/automation/versions.env
+          lock="${{ hashFiles('src-tauri/Cargo.lock') }}"
+          {
+            printf 'CARGO_CACHE_KEY=purevox-%s-%s-cargo-%s-%s\n' "$RUNNER_OS" "$LINUX_CACHE_TAG" "$CACHE_GEN" "$lock"
+            printf 'TARGET_DEBUG_KEY=purevox-%s-%s-target-dbg-%s-%s\n' "$RUNNER_OS" "$LINUX_CACHE_TAG" "$CACHE_GEN" "$lock"
+          } >> "$GITHUB_ENV"
+          echo "CARGO_CACHE_KEY=$CARGO_CACHE_KEY"
+
+      # cpal 在 Linux 上要 ALSA 开发头；WebKitGTK 4.1 是 Tauri wry 运行时必需。
+      - name: Install Linux system deps
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libssl-dev libxdo-dev librsvg2-dev libgtk-3-dev libasound2-dev \
+            libopus0 pkg-config file
+
+      - name: Install Rust toolchain (rustfmt + clippy)
+        shell: bash
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt --component clippy
+          rustup default "$RUST_TOOLCHAIN"
+          rustc --version
+
+      - name: Restore cargo registry (restore-only)
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ env.CARGO_CACHE_KEY }}
+
+      - name: Restore target/debug (restore-only)
+        uses: actions/cache/restore@v6
+        with:
+          path: src-tauri/target/debug
+          key: ${{ env.TARGET_DEBUG_KEY }}
+
+      - name: "Gate · fmt"
+        shell: bash
+        run: python tools/automation/check.py -Gate fmt
+
+      - name: "Gate · clippy"
+        shell: bash
+        run: python tools/automation/check.py -Gate clippy
+
+      - name: "Gate · build"
+        shell: bash
+        run: python tools/automation/check.py -Gate build
+
+      - name: "Gate · test"
+        shell: bash
+        run: python tools/automation/check.py -Gate test
+
+      - name: "Gate · version"
+        shell: bash
+        run: python tools/automation/check.py -Gate version
+
+  # ------------------------------------------------- 界面门禁（i18n + tsc）
+  ui:
+    name: 界面检查（tsc + i18n）
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Load versions (versions.env 是唯一来源)
+        shell: bash
+        run: |
+          while IFS= read -r line || [ -n "$line" ]; do
+            case "$line" in
+              ''|'#'*) continue ;;
+              *=*) printf '%s\n' "$line" >> "$GITHUB_ENV" ;;
+            esac
+          done < tools/automation/versions.env
+
+      # 本仓库无 package.json，不设 setup-node 的 cache（缓存只由 warm-cache.yml 写）。
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VER }}
+
+      - name: Install TypeScript (版本钉死在 versions.env)
+        shell: bash
+        run: npm install -g "typescript@$TS_VER"
+
+      # 新增 Hush 节点时改过 ui/i18n.js 的字典，这条门禁会校验 Rust 源里的
+      # 用户可见串（含节点 label）都有对应译文 —— 漏译直接红。
+      - name: "Gate · ui (tsc + i18n_lint)"
+        shell: bash
+        run: python tools/automation/check.py -Gate ui
