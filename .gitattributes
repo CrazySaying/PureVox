@@ -28,3 +28,10 @@
 *.wav -text
 *.mp3 -text
 *.opus -text
+
+# 测试数据（tests-data/）：Hush 对拍的黄金 F32 裸流与 lsnr 文本。
+# **必须显式声明** —— `* text=auto` 会按 NUL 嗅探做「兜底」，而浮点裸流里出现 0x0D
+# 是随机的：一旦被判成文本并做 eol 转换，黄金数据就静默损坏，表现是 CI 上对拍
+# 误差突然爆掉、本地却完全正常（本地工作区没有 checkout 转换）。
+*.f32 -text
+*.bin -text
