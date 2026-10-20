@@ -1,52 +1,50 @@
-# 在线编译（推送即跑）—— 推送到本分支就自动在 GitHub 上编译 + 跑门禁，并留下可下载的产物。
+# 在线编译 · 出可安装成品（推送触发）—— 推分支就在 GitHub 上打包，Actions 页面直接下载。
 #
 # 与另外两份工作流的分工（**别混用**）：
 #   - `tests.yml`：只跑门禁、只手动触发（上游纪律：日常提交零成本）。
-#   - `release.yml`：tag `v*` 触发，打正式安装包并发 release。
-#   - **本文件**：`push` 到开发分支就触发，目的是「没有本地 Rust 环境也能验证编译」。
-#     它**不建 release**、**不改 tag**，产物只挂在 workflow run 上给人手工下载。
+#   - `release.yml`：tag `v*` 触发，打包 + **建 GitHub Release**（正式发版）。
+#   - **本文件**：push 就触发，打包到 **Actions artifact**，不建 Release、不动 tag。
+#     用途：没有本地 Rust 环境，也想拿到「下载就能装」的成品。
 #
-# 为什么要有它：上游要求本地装 Rust + MSVC + WebKitGTK 才能跑 `check.py`，
-# 在纯 Windows 开发机 / 没有工具链的机器上验不了。把同一套门禁搬到 GitHub runner
-# 上，「我这台机器编不过」就不再等于「代码有问题」。
+# 产物形态与 release.yml **完全一致**（同一套 `cargo tauri build` + `assert_bundle.py`），
+# 所以这里下来的包跟正式发版的是同一种东西，只是挂在 workflow run 上而不是 Release 页面。
 #
 # 纪律与其他两份一致：
-#   - 门禁实现只有一处 `tools/automation/check.py`；本文件只负责按 step 拆开跑；
-#   - 版本 / 缓存键的唯一来源是 `tools/automation/versions.env`；
-#   - 缓存只 restore（写入者是 `warm-cache.yml`），所以这里**命中不了也能过**，
-#     只是慢一点 —— 不要为了「快」在这里加 `actions/cache/save`；
+#   - 门禁实现只有一处 `tools/automation/check.py`；版本与缓存键只来自 `versions.env`；
+#   - 缓存只 restore（写入者是 `warm-cache.yml`）——这里**不写 cache/save**；
 #   - `legacy-v*/` 快照不参与（AGENTS.md 维护准则 3）。
-name: 在线编译（推送触发）
+name: 在线编译（推送触发，出安装包）
 
 on:
   push:
-    # 只在本分支与 main 上跑：避免 fork 出来的分支每次都烧 runner 时间。
     branches:
+      # 只在本仓库的开发分支上跑：避免每次提交都烧 runner 时间。
       - main
       - tauri-port
-    # 文档与快照的改动不值得编一遍。
+    # 纯文档与快照的改动不值得编一遍（会白烧十几分钟）。
     paths-ignore:
       - "legacy-v**"
       - "**.md"
       - ".opencode/**"
   workflow_dispatch:
 
-# 同一个分支连推时，取消上一轮未完成的编译（半成品产物没有价值）。
+# 同一分支连推时取消上一轮（半成品包没有价值）。
 concurrency:
   group: online-build-${{ github.ref }}
   cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
+  # linuxdeploy / appimagetool 需要 FUSE；CI 容器里没有，用解包运行模式。
+  APPIMAGE_EXTRACT_AND_RUN: "1"
   # 脚本大量打中文；Windows runner 的 Python 默认按控制台代码页（cp1252）输出，
-  # 一句 `print("门禁全部通过")` 就是 UnicodeEncodeError。脚本内部也会 reconfigure，
-  # 这里只是双保险。
+  # 一句 `print("门禁全部通过")` 就是 UnicodeEncodeError。脚本内部也会 reconfigure，这里是双保险。
   PYTHONIOENCODING: utf-8
 
 jobs:
-  # ------------------------------------------------------------ Windows 编译
+  # ------------------------------------------------------------ Windows 安装包
   windows:
-    name: 在线编译 · Windows
+    name: 打包 · Windows（NSIS 安装包）
     runs-on: windows-latest
     defaults:
       run:
@@ -54,6 +52,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # 版本号 = 年.月.日（version.py 是唯一实现），同时生成 .build-version.json
+      # 供 `cargo tauri build --config` 覆盖 tauri.conf.json 里的 version。
       - name: Set app version（tag / 日期）
         shell: bash
         run: python tools/automation/version.py >> "$GITHUB_ENV"
@@ -76,6 +76,8 @@ jobs:
           {
             printf 'CARGO_CACHE_KEY=purevox-%s-windows-cargo-%s-%s\n' "$RUNNER_OS" "$CACHE_GEN" "$lock"
             printf 'TARGET_DEBUG_KEY=purevox-%s-windows-target-dbg-%s-%s\n' "$RUNNER_OS" "$CACHE_GEN" "$lock"
+            printf 'TARGET_RELEASE_KEY=purevox-%s-windows-target-rel-%s-%s-%s\n' "$RUNNER_OS" "$CACHE_GEN" "$TCLI_VER" "$lock"
+            printf 'TAURI_CLI_KEY=purevox-%s-tauri-cli-%s\n' "$RUNNER_OS" "$TCLI_VER"
           } >> "$GITHUB_ENV"
           echo "CARGO_CACHE_KEY=$CARGO_CACHE_KEY"
 
@@ -101,6 +103,7 @@ jobs:
           path: src-tauri/target/debug
           key: ${{ env.TARGET_DEBUG_KEY }}
 
+      # 打包前先过门禁：**发出去的包必须先是绿的**。顺序与 release.yml 一致。
       - name: "Gate · fmt"
         shell: bash
         run: python tools/automation/check.py -Gate fmt
@@ -117,6 +120,18 @@ jobs:
         shell: bash
         run: python tools/automation/check.py -Gate test
 
+      # UI 门禁（含 i18n）：Hush 节点的 label 属于用户可见串，漏译会在这里红。
+      # release.yml 在 Windows 上也跑它，这里保持一致。
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VER }}
+
+      - name: "Gate · ui (tsc + i18n_lint)"
+        shell: bash
+        run: |
+          npm install -g "typescript@$TS_VER"
+          python tools/automation/check.py -Gate ui
+
       - name: "Gate · version"
         shell: bash
         run: python tools/automation/check.py -Gate version
@@ -125,37 +140,45 @@ jobs:
         shell: bash
         run: python tools/automation/check.py -Gate bundle
 
-      # 「能编译」之外再给一个**能直接跑的程序**：debug 二进制 + onnxruntime 的
-      # DirectML.dll，打包成 zip 挂在 run 上。它不是安装包（那是 release.yml 的事），
-      # 只用来「下载下来双击看看界面起不起得来」。
-      - name: Stage runnable build
+      # tauri-cli 是打包机（只用来跑 `cargo tauri build`）。缓存里通常已有；
+      # 判据是「盘上有没有」而不是 cache-hit —— runner 镜像可能已预装。
+      - name: Restore cargo-tauri binary (restore-only)
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.cargo/bin/cargo-tauri*
+          key: ${{ env.TAURI_CLI_KEY }}
+
+      - name: Install tauri-cli（仅在缺失时编译，版本钉死）
         shell: bash
         run: |
-          set -euo pipefail
-          out="dist/online-build-windows"
-          mkdir -p "$out"
-          cp src-tauri/target/debug/purevox.exe "$out/"
-          # ort 在 Windows 上运行时需要 DirectML.dll（由 ort-sys 构建脚本放在 out/ 里）
-          dll="$(find src-tauri/target/debug/build -path '*ort-sys*/out/DirectML.dll' | head -n1 || true)"
-          if [ -n "$dll" ]; then
-            cp "$dll" "$out/"
+          if command -v cargo-tauri >/dev/null 2>&1; then
+            echo "cargo-tauri 已存在（缓存或镜像预装），跳过安装"
           else
-            echo "::warning::没找到 DirectML.dll，产物可能起不来（onnxruntime 运行时会缺 DLL）"
+            cargo install tauri-cli --version "$TCLI_VER" --locked
           fi
-          # 模型随包：界面选型号时按 models/ 找文件
-          cp -r models "$out/"
-          ls -la "$out"
 
-      - name: Upload runnable build
+      - name: Build installers (cargo tauri build)
+        working-directory: src-tauri
+        shell: bash
+        run: cargo tauri build --config .build-version.json
+
+      # 断言产物的**布局与启动**：模型是否齐全（含 models/hush/ 的四个图）、
+      # 可执行文件是否落位、起得来。这条与 release.yml 是同一份脚本。
+      - name: Assert bundle layout + startup smoke
+        shell: bash
+        run: python tools/automation/assert_bundle.py --smoke
+
+      # 一个格式一个 artifact（artifact 下载永远是 zip，改不了）。Windows 只有 NSIS 一种。
+      - name: Upload NSIS installer
         uses: actions/upload-artifact@v7
         with:
-          name: PureVox-Windows-debug-${{ env.STAMP }}
-          path: dist/online-build-windows/
+          name: PureVox-Windows-x64-${{ env.STAMP }}-setup
+          path: src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: error
 
-  # -------------------------------------------------------------- Linux 编译
+  # -------------------------------------------------------------- Linux 安装包
   linux:
-    name: 在线编译 · Linux
+    name: 打包 · Linux（deb + rpm + AppImage）
     runs-on: ubuntu-24.04
     defaults:
       run:
@@ -165,7 +188,7 @@ jobs:
 
       - name: Set app version（tag / 日期）
         shell: bash
-        run: python3 tools/automation/version.py >> "$GITHUB_ENV"
+        run: python tools/automation/version.py >> "$GITHUB_ENV"
 
       - name: Load versions + cache keys (versions.env 是唯一来源)
         shell: bash
@@ -183,24 +206,25 @@ jobs:
           {
             printf 'CARGO_CACHE_KEY=purevox-%s-%s-cargo-%s-%s\n' "$RUNNER_OS" "$LINUX_CACHE_TAG" "$CACHE_GEN" "$lock"
             printf 'TARGET_DEBUG_KEY=purevox-%s-%s-target-dbg-%s-%s\n' "$RUNNER_OS" "$LINUX_CACHE_TAG" "$CACHE_GEN" "$lock"
+            printf 'TARGET_RELEASE_KEY=purevox-%s-%s-target-rel-%s-%s-%s\n' "$RUNNER_OS" "$LINUX_CACHE_TAG" "$CACHE_GEN" "$TCLI_VER" "$lock"
+            printf 'TAURI_CLI_KEY=purevox-%s-tauri-cli-%s\n' "$RUNNER_OS" "$TCLI_VER"
           } >> "$GITHUB_ENV"
           echo "CARGO_CACHE_KEY=$CARGO_CACHE_KEY"
 
-      # cpal 在 Linux 上要 ALSA 开发头；WebKitGTK 4.1 是 Tauri wry 运行时必需。
+      # Tauri wry 运行时 (WebKitGTK 4.1) + cpal (ALSA) + 打 rpm 需要 rpmbuild。
       - name: Install Linux system deps
         shell: bash
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev libssl-dev libxdo-dev librsvg2-dev libgtk-3-dev libasound2-dev \
-            libopus0 pkg-config file
+            libopus0 xvfb pkg-config file rpm
 
       - name: Install Rust toolchain (rustfmt + clippy)
         shell: bash
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt --component clippy
           rustup default "$RUST_TOOLCHAIN"
-          rustc --version
 
       - name: Restore cargo registry (restore-only)
         uses: actions/cache/restore@v6
@@ -232,11 +256,67 @@ jobs:
         shell: bash
         run: python tools/automation/check.py -Gate test
 
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VER }}
+
+      - name: "Gate · ui (tsc + i18n_lint)"
+        shell: bash
+        run: |
+          npm install -g "typescript@$TS_VER"
+          python tools/automation/check.py -Gate ui
+
       - name: "Gate · version"
         shell: bash
         run: python tools/automation/check.py -Gate version
 
-  # ------------------------------------------------- 界面门禁（i18n + tsc）
+      - name: Restore cargo-tauri binary (restore-only)
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.cargo/bin/cargo-tauri*
+          key: ${{ env.TAURI_CLI_KEY }}
+
+      - name: Install tauri-cli（仅在缺失时编译，版本钉死）
+        shell: bash
+        run: |
+          if command -v cargo-tauri >/dev/null 2>&1; then
+            echo "cargo-tauri 已存在（缓存或镜像预装），跳过安装"
+          else
+            cargo install tauri-cli --version "$TCLI_VER" --locked
+          fi
+
+      - name: Build installers (cargo tauri build)
+        working-directory: src-tauri
+        shell: bash
+        run: cargo tauri build --config .build-version.json
+
+      - name: Assert bundle layout + smoke (deb)
+        shell: bash
+        run: python tools/automation/assert_bundle.py --smoke
+
+      # 一个格式一个 artifact，理由同 Windows（AppImage 单它 ~200 MB）。
+      - name: Upload deb
+        uses: actions/upload-artifact@v7
+        with:
+          name: PureVox-Linux-x64-${{ env.VERSION }}-deb
+          path: src-tauri/target/release/bundle/deb/*.deb
+          if-no-files-found: error
+
+      - name: Upload rpm
+        uses: actions/upload-artifact@v7
+        with:
+          name: PureVox-Linux-x64-${{ env.VERSION }}-rpm
+          path: src-tauri/target/release/bundle/rpm/*.rpm
+          if-no-files-found: error
+
+      - name: Upload AppImage
+        uses: actions/upload-artifact@v7
+        with:
+          name: PureVox-Linux-x64-${{ env.VERSION }}-appimage
+          path: src-tauri/target/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
+
+  # ------------------------------------------------------------ 界面门禁（单独）
   ui:
     name: 界面检查（tsc + i18n）
     runs-on: ubuntu-24.04
@@ -265,8 +345,6 @@ jobs:
         shell: bash
         run: npm install -g "typescript@$TS_VER"
 
-      # 新增 Hush 节点时改过 ui/i18n.js 的字典，这条门禁会校验 Rust 源里的
-      # 用户可见串（含节点 label）都有对应译文 —— 漏译直接红。
       - name: "Gate · ui (tsc + i18n_lint)"
         shell: bash
         run: python tools/automation/check.py -Gate ui
