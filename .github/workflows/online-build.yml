@@ -52,6 +52,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # 版本号门禁要**先跑**：它内部的 `Gate · version` 会用 4 个假 tag 反复跑
+      # version.py，并在 finally 里删掉 `.build-version.json`（防止假日期污染真实构建）。
+      # 放在 `Set app version` 之后就会把真文件删掉 → `cargo tauri build --config`
+      # 报 `No such file or directory`（本工作流第一版就这么挂的）。
+      - name: "Gate · version"
+        shell: bash
+        run: python tools/automation/check.py -Gate version
+
       # 版本号 = 年.月.日（version.py 是唯一实现），同时生成 .build-version.json
       # 供 `cargo tauri build --config` 覆盖 tauri.conf.json 里的 version。
       - name: Set app version（tag / 日期）
@@ -132,10 +140,8 @@ jobs:
           npm install -g "typescript@$TS_VER"
           python tools/automation/check.py -Gate ui
 
-      - name: "Gate · version"
-        shell: bash
-        run: python tools/automation/check.py -Gate version
-
+      # 注意：`Gate · version` 已在 job 最前面跑过（它会删掉 .build-version.json），
+      # 这里不能再跑，否则又把真版本文件删掉、打包时找不到配置。
       - name: "Gate · bundle"
         shell: bash
         run: python tools/automation/check.py -Gate bundle
@@ -185,6 +191,12 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v7
+
+      # 与 Windows job 同一条理由：version 门禁会删掉 `.build-version.json`，
+      # 必须排在 `Set app version` **之前**（它会跑 4 个假 tag 并在 finally 里清理）。
+      - name: "Gate · version"
+        shell: bash
+        run: python tools/automation/check.py -Gate version
 
       - name: Set app version（tag / 日期）
         shell: bash
@@ -266,10 +278,7 @@ jobs:
           npm install -g "typescript@$TS_VER"
           python tools/automation/check.py -Gate ui
 
-      - name: "Gate · version"
-        shell: bash
-        run: python tools/automation/check.py -Gate version
-
+      # 同上：version 门禁已在 job 最前面跑过，别在这里再删一次版本文件。
       - name: Restore cargo-tauri binary (restore-only)
         uses: actions/cache/restore@v6
         with:
