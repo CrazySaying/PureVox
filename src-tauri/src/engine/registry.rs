@@ -218,6 +218,15 @@ static SPECS: &[NodeSpec] = &[
       },
     }],
   },
+  // Hush 是**独立的降噪节点**，不是降噪的又一档模型：外部模型（Apache-2.0，
+  // 16 kHz 原生、输出带宽上限 8 kHz），专门针对**背景人声**训练，与自研 48 kHz
+  // 全带宽降噪互补，可按需串联或二选一。它没有型号下拉（只有一套权重）。
+  NodeSpec {
+    ptype: "hush",
+    label: crate::infer::HUSH_LABEL,
+    kind: NodeKind::Process,
+    params: &[],
+  },
   NodeSpec {
     ptype: "gain",
     label: "增益",
@@ -371,6 +380,9 @@ pub fn create_stage(
         &model,
       )?))
     }
+    "hush" => Ok(Box::new(super::components::hush::HushStage::load(
+      crate::infer::HUSH_DIR,
+    )?)),
     "tse" => {
       let model = match params.get("model") {
         Some(ParamValue::Text(t)) => t.clone(),

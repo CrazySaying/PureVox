@@ -17,11 +17,18 @@
 
 //! ONNX 推理（onnxruntime，`ort`）。模型契约见 `denoise.rs`。
 //!
-//! 模型是流式的：每 10 ms 一个 `*_hop`（480 样本）+ 一个大的一维 `cache_in`，
-//! 返回处理后的 hop 与新的 `cache_out`；引擎只负责搬运波形与缓存，STFT 在模型图内。
+//! 两类模型，接口在**对外**这一层是统一的（都是 10 ms hop 波形进出）：
+//!
+//! - **dfnet 系**（降噪 / AEC / TSE）：STFT 在模型图内，每 hop 一个 `mix_hop`
+//!   + 一维 `cache_in` → `enh_hop` + `cache_out`；引擎只搬运波形与缓存。
+//! - **Hush**（[`hush`]）：STFT 在 host 侧（`dsp::hush_df`），四个图 + 显式循环状态，
+//!   内部还要做 48 kHz ↔ 16 kHz 的 3:1 重采样。差别全在模块内部，对外仍是波形进出。
 
 pub mod aec;
 pub mod denoise;
+pub mod hush;
+#[cfg(test)]
+mod hush_parity;
 pub mod tse;
 
 use std::path::{Path, PathBuf};
@@ -72,6 +79,14 @@ pub(crate) fn cache_dim(session: &Session, name: &str) -> Result<usize, String> 
 /// 现役降噪模型（models/ 下的文件名）。
 pub const MODEL_DENOISE: &str = "purevox_denoise_202609c_ep0012.onnx";
 
+/// Hush 的模型目录（`models/` 下的子目录名，内含四个 ONNX 图 + `config.ini`）。
+pub const HUSH_DIR: &str = "hush";
+
+/// Hush 的界面名。它与 PureVox 降噪**不是一个模型的不同档**：Hush 是外部模型
+/// （pulp-vision/Hush，Apache-2.0，16 kHz 原生，输出带宽上限 8 kHz），
+/// 面向**背景人声**抑制，与自研 48 kHz 全带宽降噪互补。
+pub const HUSH_LABEL: &str = "Hush AI 降噪（16k）";
+
 /// 可选降噪模型 (文件名, 界面名)，供界面下拉（DESIGN.md §7）。
 pub fn denoise_models() -> &'static [(&'static str, &'static str)] {
   &[
@@ -82,32 +97,39 @@ pub fn denoise_models() -> &'static [(&'static str, &'static str)] {
   ]
 }
 
-/// 解析模型文件路径。开发时模型在仓库 `models/`，打包后应在可执行文件旁/资源目录。
-pub fn model_path(file: &str) -> Result<PathBuf, String> {
-  let mut tried = Vec::new();
+/// 全部候选 `models/` 目录（按优先级）。开发时模型在仓库 `models/`，
+/// 打包后应在可执行文件旁/资源目录。
+fn model_dirs() -> Vec<PathBuf> {
   let mut candidates: Vec<PathBuf> = Vec::new();
   // 打包后优先用 Tauri 注册的资源目录（Linux deb 落在 /usr/lib/<productName>/models，
   // 与可执行文件不同级，仅靠 exe 相邻目录找不到）。
   if let Some(dir) = MODEL_DIR.get() {
-    candidates.push(dir.join(file));
+    candidates.push(dir.clone());
   }
   if let Ok(dir) = std::env::var("PUREVOX_MODEL_DIR") {
-    candidates.push(PathBuf::from(dir).join(file));
+    candidates.push(PathBuf::from(dir));
   }
   if let Ok(cwd) = std::env::current_dir() {
-    candidates.push(cwd.join("models").join(file));
-    candidates.push(cwd.join("..").join("models").join(file));
+    candidates.push(cwd.join("models"));
+    candidates.push(cwd.join("..").join("models"));
   }
   if let Ok(exe) = std::env::current_exe() {
     let dir = exe.parent().unwrap_or(Path::new("."));
-    candidates.push(dir.join("models").join(file));
+    candidates.push(dir.join("models"));
     // target/debug/purevox.exe → 仓库根/models
     if let Some(repo) = dir.ancestors().nth(3) {
-      candidates.push(repo.join("models").join(file));
+      candidates.push(repo.join("models"));
     }
-    candidates.push(dir.join("resources").join("models").join(file));
+    candidates.push(dir.join("resources").join("models"));
   }
-  for c in candidates {
+  candidates
+}
+
+/// 解析模型文件路径（模型文件必须存在）。
+pub fn model_path(file: &str) -> Result<PathBuf, String> {
+  let mut tried = Vec::new();
+  for dir in model_dirs() {
+    let c = dir.join(file);
     if c.is_file() {
       return Ok(c);
     }
@@ -115,6 +137,26 @@ pub fn model_path(file: &str) -> Result<PathBuf, String> {
   }
   Err(format!(
     "找不到模型 {file}；可用 PUREVOX_MODEL_DIR 指定模型目录。已尝试：{}",
+    tried.join("；")
+  ))
+}
+
+/// 解析模型**子目录**路径（Hush 是「一个目录 + 四个图」，不是单个文件）。
+///
+/// 判据是目录里存在 [`hush::REQUIRED_FILE`]：那样才算真的找到了模型目录，
+/// 而不是碰巧命中了某个同名空目录。
+pub fn model_dir_path(sub: &str) -> Result<PathBuf, String> {
+  let mut tried = Vec::new();
+  for dir in model_dirs() {
+    let c = dir.join(sub);
+    if c.join(hush::REQUIRED_FILE).is_file() {
+      return Ok(c);
+    }
+    tried.push(c.display().to_string());
+  }
+  Err(format!(
+    "找不到模型目录 {sub}/（需含 {}）；可用 PUREVOX_MODEL_DIR 指定模型目录。已尝试：{}",
+    hush::REQUIRED_FILE,
     tried.join("；")
   ))
 }

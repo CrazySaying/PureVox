@@ -32,6 +32,7 @@
     ],
     "resources": {
       "../models/*.onnx": "models/",
+      "../models/hush/*": "models/hush/",
       "opus.dll": "opus.dll"
     },
     "linux": {

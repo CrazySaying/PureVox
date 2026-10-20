@@ -19,6 +19,7 @@
 
 pub mod denoise;
 pub mod gain;
+pub mod hush;
 pub mod player;
 pub mod soundpad;
 pub mod tse;

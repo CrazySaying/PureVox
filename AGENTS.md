@@ -348,6 +348,25 @@ release 构建同样保留（不允许用编译开关剔除）。
   现役模型常量 `infer::MODEL_DENOISE`（降噪）、`infer::MODEL_AEC`（AEC，202610 单流：
   far/mic 各 5ch 第 0 层 early fusion + iLN，**无显式延迟线**（对齐靠 GRU 隐状态）、cache 91,920；
   2026-10-18 换下 202609cpx，旧文件已从 `models/` 移除）。
+- **Hush 降噪**（`infer::hush` + `dsp::hush_df` + `dsp::resample3`，`ptype = hush`）：
+  **不是降噪的又一档型号，是独立的处理行**——外部模型（pulp-vision/Hush，Apache-2.0），
+  16 kHz 原生、**输出带宽上限 8 kHz**，面向**背景人声**抑制，与自研 48 kHz 全带宽降噪互补
+  （可串联、可二选一）。它与 dfnet 系的关键差别是**STFT 在 host 侧**（模型图里没有），
+  所以自带 48k↔16k 抗混叠多相 FIR；对外仍守同一条契约（10 ms hop 波形进出），
+  故 `Stage` 接口与别的处理行完全一样，`list_models` 对它返回空（没有型号可挑）。
+  - **四个图 + 显式循环状态**：`enc_conv`（卷积编码器，**必须吃 3 帧窗口取末帧**，
+    流开头不足就按实际帧数跑）/ `enc_gru`（1 个状态）/ `erb_dec`（1 个）/ `df_dec`（**3 个**）。
+    状态形状都是 `[1,1,256]`；`enc_conv` 的输出是 `[1,16,S,K]`（**通道在时间之前**，
+    取末帧必须逐通道取，不能按扁平尾部截断——踩过）。
+  - **门控三档**（对齐官方 `weya_nc`）：帧均方 < 1e-7 → 输出全零、**状态一律不推进**；
+    lsnr < -15 → 零掩码、不跑两个解码器；lsnr > 35 → 直通；其余 → 掩码 + 5 阶深滤波。
+  - **深滤波的帧序**是「`frames[0]` = 最旧、末位 = 当前帧」，补零补在**前面**。
+  - **ERB 带宽表**必须用 libdf 的 9.265 公式（不是 Slaney 兜底），且 `n = fb - prev - over`
+    **要按有符号算**：相邻带因舍入提前时 n 会为负，用无符号减法会静默饱和、整张表偏掉。
+  - 移植的正确性由 `infer/hush_parity.rs` 钉住（与 Python 参考实现逐样本对拍，
+    300 hop 最大相对误差 ~5e-6、lsnr 完全一致）；黄金数据用环境变量 `HUSH_PARITY_DIR`
+    指路，未设置时跳过（CI 没有这份数据，不能让它变红）。
+
 - **AEC 行 / TSE 行**：AEC 是**输入行**（`ptype = echo_cancel`，本行 `device` = 近端 mic，
   `params.far_device` = 远端参考：`loopback` = 系统默认输出回环、`loopback:<渲染端点ID>` = 指定输出
   回环（WASAPI loopback，`audio/loopback.rs`，仅 Windows）、其它 = 输入设备；`far_delay_ms` **有符号**

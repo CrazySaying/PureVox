@@ -54,6 +54,11 @@ reqwest = { version = "0.13", default-features = false, features = [
 ] }
 # 调试频谱
 rustfft = "6"
+# Hush 的 host 侧 STFT（`dsp/hush_df.rs`）：频谱是实数输入 → 复数输出、
+# 逆变换回到实数，用 realfft 比手搓 rustfft + 打包实部省一半 bin。
+# 它同源 rustfft（`realfft::num_complex` 就是 `rustfft::num_complex`），
+# 版本随 rustfft 6 走；随 tauri/ort 之外唯一新增的纯 Rust 依赖。
+realfft = "3"
 # 媒体库导入：解码任意常见音频 → 归一为 48k 单声道 WAV（纯 Rust，不引入 C 编译链；
 # 与 Opus 运行时加载同一纪律）。
 # 注意 symphonia 的 feature 分两类：**容器**（format）与**解码器**（codec），缺一不可：

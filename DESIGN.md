@@ -144,7 +144,7 @@ pub fn create_stage(ptype: &str, params: &Params) -> Result<Box<dyn Stage>, Stri
 | 类别 | ptype（示例） | 说明 |
 | --- | --- | --- |
 | 输入 | `audio_input` / `loopback` / `remote_mic` / `echo_cancel` | 源；同列多个混合 |
-| 处理 | `denoise_*` / `eq` / `gain` / `agc` / `compressor` / `soundpad` / `player` | Stage；就地处理 |
+| 处理 | `denoise` / `hush` / `eq` / `gain` / `agc` / `compressor` / `soundpad` / `player` | Stage；就地处理 |
 | 输出 | `audio_output` / `remote_speaker` | 汇；位置 tap，送往设备或网络 |
 | 可视化 | `vu_meter` / `spectrum` | 只读 tap |
 
@@ -568,6 +568,27 @@ pub fn resolve(key: &str, kind: ModelKind) -> Option<&'static ModelDesc>;
 - **权重按文件共享一份**（`Arc<Session>`），**`cache` 每行一份**；惰性加载；行/会话停止即释放引用。
 - **不做空闲自动卸载**；**不热切换模型文件**（改型号 = 结构性变更 → 重启）。
 
+### 7.1 两类模型的归属差异：单文件 vs 目录
+
+dfnet 系（降噪 / AEC / TSE）是**一个 ONNX 一个契约**：`*_hop [1,480]` + `cache_in [1,D]` →
+`enh_hop` + `cache_out`，STFT 在模型图内，缓存维度从输入读。
+
+**Hush（`ptype = hush`）是另一类**，不能塞进同一个「型号下拉」：
+
+| 维度 | dfnet 系 | Hush |
+| --- | --- | --- |
+| 模型资产 | 单个 `.onnx` | **一个目录**（`models/hush/`，四个图 + `config.ini`） |
+| STFT | 在模型图内 | **在 host 侧**（`dsp::hush_df`），引擎要自己做 |
+| 采样率 | 48 kHz 原生 | **16 kHz 原生** → 自带 48k↔16k 多相 FIR |
+| 状态 | 一个扁平 `cache` | 四个图各自的循环状态（1 + 1 + 3 个 `[1,1,256]`） |
+| 型号选择 | 有（多个权重） | **无**（只有一套权重，`list_models` 返回空） |
+| 带宽 | 48 kHz 全带宽 | **上限 8 kHz**（16 kHz 原生模型的固有属性） |
+
+因此它落地为**独立的处理行类型**而不是又一条型号记录：`infer::model_path` 只找文件，
+`infer::model_dir_path` 专门找「目录里含 `enc_conv.onnx`」的模型目录。
+**别为了省一个节点类型把它做成降噪的档位** —— 那会让「选型号」这个界面语义同时承载
+两种完全不同的东西（一个是权重文件，一个是采样率/带宽/资产布局全不同的模型）。
+
 ---
 
 ## 8. 内存管理
@@ -625,7 +646,8 @@ pub fn resolve(key: &str, kind: ModelKind) -> Option<&'static ModelDesc>;
 | 设备枚举（cpal / 稳定 ID）+ 刷新按钮 | ✅ 已实现（顶栏「刷新设备」，只更新列表、不动流） | §6 |
 | 采集 → 重采样 → 48k hop | ✅ 已实现 | 作为「输入行」的源 |
 | 输出 + 时钟伺服 | ✅ 已实现 | 作为「输出行」的汇 |
-| 降噪 ONNX | ✅ 已实现（1.8 ms/hop） | 包成 `Stage`，放进列 |
+| **降噪 ONNX（dfnet 系）** | ✅ 已实现（1.8 ms/hop） | 包成 `Stage`，放进列 |
+| **Hush 降噪（外部模型，16k）** | ✅ 已实现：`infer/hush` + `dsp/hush_df` + `dsp/resample3`，`ptype = hush` 独立处理行；与 Python 参考实现逐样本对拍（300 hop 相对误差 ~5e-6） | §7.1 |
 | 调试面板 + HTTP 调试接口 | ✅ 已实现（含 `ui` 前端自报、`column` 列概要） | 补行状态、模型字段 |
 | **Stage / Pipeline / 注册表** | ✅ 已实现 | §3.4 / 3.5 |
 | **列工作线程 + 行环** | ✅ 已实现（多列独立、自上而下位置语义） | §3.3 |

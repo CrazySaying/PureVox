@@ -293,6 +293,7 @@
     '测试音 1 kHz': 'Test tone 1 kHz',
     'AEC 回声消除': 'AEC echo cancel',
     降噪: 'Denoise',
+    'Hush AI 降噪（16k）': 'Hush AI denoise (16k)',
     增益: 'Gain',
     '目标说话人 TSE': 'Target speaker TSE',
     音频输出: 'Audio output',

@@ -15,7 +15,13 @@
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! L1 DSP：重采样、hop 切片、电平/波形/频谱测量。不碰设备（DESIGN.md §1）。
+//! L1 DSP：重采样、hop 切片、电平/波形/频谱测量，以及模型的 host 侧 DSP。
+//! 不碰设备（DESIGN.md §1）。
 
+pub mod hush_df;
 pub mod meter;
+pub mod resample3;
 pub mod resampler;
+
+#[cfg(test)]
+mod fft_contract;

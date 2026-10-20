@@ -218,11 +218,16 @@ struct ModelInfo {
 }
 
 /// 某类处理节点的可选模型（供界面下拉）。
+///
+/// `hush` 返回空列表：它只有一套权重（没有型号可挑），界面对空列表不画下拉。
+/// 若落进 `_` 分支就会把降噪的型号列表挂到 Hush 上——那是错的（型号文件名对
+/// Hush 无意义，选了也不会生效）。
 #[tauri::command]
 fn list_models(ptype: String) -> Vec<ModelInfo> {
   let list: &[(&str, &str)] = match ptype.as_str() {
     "tse" => infer::tse::tse_models(),
     "echo_cancel" => infer::aec::aec_models(),
+    "hush" => &[],
     _ => infer::denoise_models(),
   };
   list

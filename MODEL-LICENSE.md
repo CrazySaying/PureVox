@@ -27,7 +27,25 @@ PureVox 的源代码采用 **GNU General Public License v3.0 or later (GPL-3.0)*
 - <https://github.com/a2heng/lightweight-denoise-48k>（MIT，可自由使用）
 - <https://github.com/a2heng/lightweight-aec-48k>（MIT，可自由使用）
 
-## 二、授权范围
+## 二、外部模型（Apache-2.0）
+
+以下模型**不是** a2heng 的财产，**不受**本文第二、三节的专有条款约束：
+
+- `models/hush/*.onnx`（`enc_conv` / `enc_gru` / `erb_dec` / `df_dec` 四个图）
+
+来源：**Hush**（<https://github.com/pulp-vision/Hush>），以 **Apache-2.0** 发布，
+其网络结构源自 DeepFilterNet（<https://github.com/Rikorose/DeepFilterNet>，
+MIT / Apache-2.0 双许可）。因此这四个图可以按 Apache-2.0 自由再分发与修改，
+归属与许可全文见 `LICENSE-THIRD-PARTY.txt`。
+
+注意与自研模型的区别（选型时看，不是法务条款）：
+
+- Hush 是 **16 kHz 原生**模型，**输出带宽上限 8 kHz** —— 8 kHz 以上内容被完全移除
+  （不是衰减）。这是该模型的固有属性，不是实现缺陷。
+- 它面向**背景人声**（旁人说话）抑制训练，与自研 48 kHz 全带宽降噪互补，
+  两者可按需串联或二选一。
+
+## 三、授权范围
 
 在未获得作者另行书面授权的情况下：
 
@@ -36,7 +54,7 @@ PureVox 的源代码采用 **GNU General Public License v3.0 or later (GPL-3.0)*
 - 禁止：以任何形式将模型用于闭源或开源商业产品的核心功能；
 - 禁止：移除、隐匿本声明及模型的版权信息。
 
-## 三、申请授权
+## 四、申请授权
 
 如需将模型用于其它用途（包括但不限于：集成到其它项目、商业产品、模型蒸馏与训练），
 请联系作者获取授权：
@@ -45,7 +63,7 @@ PureVox 的源代码采用 **GNU General Public License v3.0 or later (GPL-3.0)*
 - 哔哩哔哩: <https://space.bilibili.com/10850943>
 - 邮箱: <752848283@qq.com>
 
-## 四、免责声明
+## 五、免责声明
 
 除适用法律强制规定外，PureVox 及内置模型按"原样"提供，不附带任何明示或默示保证。
 任何因使用本软件或模型而产生的直接或间接损失，作者均不承担责任（除非另行书面约定）。
